@@ -1,0 +1,9 @@
+Pyrogram==2.0.106
+tgcrypto
+aiohttp
+pytz
+psutil
+requests
+yt-dlp
+curl_cffi
+brotli
