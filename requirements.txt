@@ -7,4 +7,4 @@ requests
 yt-dlp
 curl_cffi
 brotli
-pip install hachoir
+hachoir
