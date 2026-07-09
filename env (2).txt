@@ -1,0 +1,30 @@
+# Telegram Bot Credentials (required)
+API_ID=29481626
+API_HASH=4892185769903521077c4cea97808b8c
+BOT_TOKEN=8890761859:AAFGAaN1ZPBkaGGBLvB_XUTRTjOs4-HQaKw
+
+# Authorized user IDs (space or comma separated)
+OWNER_IDS=5856009289
+
+# Optional settings
+TIMEZONE=Asia/Kolkata
+BRAND_TITLE=Anime Cartoon
+DEFAULT_FILENAME=Anime Cartoon
+DEFAULT_REC_DURATION=01:00:00
+RETENTION_HOURS=3
+SUPPORT_USERNAME=LS_Owner_bot
+SUPPORT_CHANNEL=LittleSinghamChannel
+BOT_USERNAME=LittlesinghamMovie_Bot
+
+# Group settings
+GROUP_CHAT_ID="-1003726271113"
+GROUP_INVITE_LINK=https://t.me/+m_yCHi8Bdv02Y2Y1
+
+# Shrinkme URL shortener (optional)
+SHRINKME_API_KEY=9503d9bf87c90aa9e0aab35d4dec7d1ce24c0a23
+
+# Google Drive upload (optional)
+GDRIVE_SA_JSON=
+GDRIVE_FOLDER_ID=
+GOOGLE_CLIENT_ID=
+GOOGLE_CLIENT_SECRET=
