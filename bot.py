@@ -120,7 +120,7 @@ SUPPORT_CHANNEL     = _environ.get("SUPPORT_CHANNEL",     "LS_Owner_bot")
 GROUP_CHAT_ID       = _parse_int("GROUP_CHAT_ID",  _environ.get("GROUP_CHAT_ID",  "0"))
 GROUP_INVITE_LINK   = _environ.get("GROUP_INVITE_LINK", "https://t.me/+ww77CDQwoigzYjk1")
 
-SHRINKME_API_KEY    = _environ.get("SHRINKME_API_KEY",    "")
+SHRINKME_API_KEY    = _environ.get("SHORTXLINKS_API_KEY", _environ.get("SHRINKME_API_KEY", ""))
 BOT_USERNAME        = _environ.get("BOT_USERNAME",        "LittlesinghamMovie_Bot")
 
 GDRIVE_SA_JSON      = _environ.get("GDRIVE_SA_JSON",      "")
@@ -4752,7 +4752,7 @@ _VERIFY_LINK_TTL = 300  # seconds before link expires and a new one is generated
 
 
 # ---------------------------------------------------------------------------
-# Shrinkme.io URL shortener (sync wrapped in asyncio.to_thread)
+# shortxlinks.in URL shortener (sync wrapped in asyncio.to_thread)
 # ---------------------------------------------------------------------------
 
 def _shrink2_sync(api_url: str):
@@ -4768,10 +4768,10 @@ def _shrink2_sync(api_url: str):
 
 
 async def _shrink2(long_url: str) -> str:
-    """Shorten via shrinkme.io. Returns the short URL, or the original on failure."""
+    """Shorten via shortxlinks.in. Returns the short URL, or the original on failure."""
     key     = SHRINKME_API_KEY
     encoded = urllib.parse.quote(long_url, safe=":/?&=%")
-    api_url = f"https://shrinkme.io/api?api={key}&url={encoded}"
+    api_url = f"https://shortxlinks.in/api?api={key}&url={encoded}"
     try:
         short = await asyncio.to_thread(_shrink2_sync, api_url)
         if short:
@@ -5022,7 +5022,7 @@ async def start_cmd(client: Client, message: Message):
     uid  = message.from_user.id
     name = message.from_user.first_name or "User"
 
-    # ── Deep-link: /start vfy_{uid}  (user came via shrinkme.io ad click) ──
+    # ── Deep-link: /start vfy_{uid}  (user came via shortxlinks.in ad click) ──
     param = message.command[1] if len(message.command) > 1 else ""
     if param.startswith("vfy_"):
         claimed_uid = int(param[4:]) if param[4:].isdigit() else 0
@@ -5344,7 +5344,7 @@ async def drivelogout_cmd(client: Client, message: Message):
 
 
 # ---------------------------------------------------------------------------
-# /verify — ad-click self-service verification (shrinkme.io)
+# /verify — ad-click self-service verification (shortxlinks.in)
 # ---------------------------------------------------------------------------
 
 @app.on_message(filters.command("verify") & AUTH)
