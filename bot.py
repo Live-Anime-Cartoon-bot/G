@@ -262,7 +262,7 @@ BOT_CHANNELS = {
     "CARTOON NETWORK 2": "http://202.70.146.135:8000/play/a0a8/index.m3u8",
     "CARTOON NETWORK HD+": "http://202.70.146.135:8000/play/a0a3/index.m3u8",
     "DISCOVERY KIDS 3": "http://202.70.146.135:8000/play/a0a6/index.m3u8",
-"Pogo 3": "http://202.70.146.135:8000/play/a0a3/index.m3u",
+"Pogo 3": "http://66.102.126.10:8000/play/a00d/index.m3u8",
 "Nick HD": "http://103.174.195.62:8000/play/a0ch",
 }
 ADMIN_FILE       = join(DATA_DIRECTORY, "admins.json")
