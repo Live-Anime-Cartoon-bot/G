@@ -1980,7 +1980,6 @@ async def do_record(client: Client, query: CallbackQuery, setup: dict):
         if was_cancelled:
             caption = (f"🎬 **{BRAND_TITLE}**\n\n"
                        f"Duration: `{TimeFormatter(dur * 1000)}`\nFormat: `MKV (partial)`\n"
-                       f"Channel: @{SUPPORT_CHANNEL}\n\n"
                        f"_Recording was cancelled — partial file attached._\n{retention_note}")
         else:
             caption = (f"🎬 **{BRAND_TITLE}**\n\n"
@@ -1988,7 +1987,7 @@ async def do_record(client: Client, query: CallbackQuery, setup: dict):
                        f"Quality: `{q_str}` | Aspect: `{asp_label}`\n"
                        f"Audio: `{audio_note}`\n"
                        + (f"{wm_note}\n" if wm_note else "")
-                       + f"Channel: @{SUPPORT_CHANNEL}\n\n{retention_note}")
+                       + f"{retention_note}")
 
         send_target  = orig_msg or (query.message if query else msg)
         size_bytes   = os.path.getsize(video_path)
@@ -2739,7 +2738,7 @@ async def handle_ott_download(client: Client, message: Message,
         caption = (f"🎬 **{BRAND_TITLE}**\n\n"
                    f"Duration: `{TimeFormatter(duration * 1000)}`\n"
                    f"Source: `{(info.get('extractor_key') or info.get('extractor') or 'OTT')}`\n"
-                   f"Channel: @{SUPPORT_CHANNEL}\n\n{retention_note}")
+                   f"{retention_note}")
 
         _dest = await _await_upload_choice(
             user_id, msg,
@@ -3265,7 +3264,7 @@ async def run_compress(client: Client, status_msg: Message, state: dict):
                    f"Duration: `{TimeFormatter(int(duration * 1000))}`\n"
                    f"Resolution / codec: `{res_cfg['label']}`\n"
                    f"Audio: `{', '.join(LANG_LABEL.get(l, l.upper()) for l in langs)}`\n"
-                   f"Channel: @{SUPPORT_CHANNEL}\n\n{retention_note}")
+                   f"{retention_note}")
 
         _dest = await _await_upload_choice(
             user_id, status_msg,
@@ -3469,8 +3468,7 @@ async def run_screenshots(client: Client, status_msg: Message, state: dict, n: i
                 global_idx = chunk_start + i + 1
                 cap = (f"🎬 **{BRAND_TITLE}**\n\n"
                        f"📸 `{len(produced)}` screenshot{'s' if len(produced) != 1 else ''} • "
-                       f"video `{TimeFormatter(int(duration * 1000))}`\n"
-                       f"Channel: @{SUPPORT_CHANNEL}"
+                       f"video `{TimeFormatter(int(duration * 1000))}`"
                        if first and i == 0
                        else f"`{global_idx:02d}` • `{TimeFormatter(int(ts * 1000))}`")
                 media.append(InputMediaPhoto(media=path, caption=cap))
@@ -3610,7 +3608,7 @@ async def run_merge(client: Client, message: Message, sess: dict):
         caption = (f"🎬 **{BRAND_TITLE}**\n\n"
                    f"🧩 Merged `{len(videos)}` videos\nDuration: `{TimeFormatter(int(total_dur * 1000))}`\n"
                    f"Size: `{out_size_mb:.1f} MB`\nMethod: `{used_method}`\n"
-                   f"Channel: @{SUPPORT_CHANNEL}\n\n{retention_note}")
+                   f"{retention_note}")
 
         _dest = await _await_upload_choice(user_id, status, f"Merged: `{out_size_mb:.1f} MB`")
         if _dest != "cancel":
@@ -3836,7 +3834,7 @@ async def run_title(client: Client, status_msg: Message, state: dict, pos_key: s
                    f"📌 Position: `{pos_label}`\n"
                    f"⏱ Duration: `{TimeFormatter(int(duration * 1000))}`\n"
                    f"💾 Size: `{out_size_mb:.1f} MB`\n"
-                   f"Channel: @{SUPPORT_CHANNEL}{long_note}\n\n"
+                   f"{long_note}\n\n"
                    f"{retention_note}")
 
         upload_start = time.time()
@@ -4931,7 +4929,6 @@ Cancel active recording/job.
 • `/verify` — Request verification.
 • `/limit` — Check recording quota.
 
-📡 Support: @{SUPPORT_CHANNEL}
 """
 
 _OWNER_HELP_TEXT = """
@@ -5063,7 +5060,6 @@ async def start_cmd(client: Client, message: Message):
         f"👋 Hello, **{name}**!\n\n"
         f"Welcome to **{BRAND_TITLE}**.\n\n"
         f"I can record HLS / M3U8 streams and download from OTT platforms.\n\n"
-        f"📡 Channel: @{SUPPORT_CHANNEL}\n"
         f"📧 Support: @{SUPPORT_USERNAME}\n\n"
         f"Use the buttons below to get started:",
         reply_markup=_make_start_kb(),
@@ -5657,8 +5653,7 @@ async def upload_choice_cb(client: Client, cq: CallbackQuery):
                 try:
                     await send_target.reply_video(
                         video=last_clip,
-                        caption=(f"🎬 **{BRAND_TITLE}** — ⏭ Last 2 minute\n"
-                                 f"Channel: @{SUPPORT_CHANNEL}"),
+                        caption=(f"🎬 **{BRAND_TITLE}** — ⏭ Last 2 minute"),
                         supports_streaming=True,
                     )
                 except Exception as ce:
@@ -6841,7 +6836,6 @@ async def plan_cmd(client: Client, message: Message):
 async def contact_cmd(client: Client, message: Message):
     await message.reply_text(
         f"📬 **Contact & Support**\n\n"
-        f"📡 Channel: @{SUPPORT_CHANNEL}\n"
         f"💬 Support: @{SUPPORT_USERNAME}\n\n"
         f"For subscriptions, custom requests, or issues — reach us on the channel or DM support."
     )
@@ -8367,7 +8361,7 @@ async def trim_cmd(client: Client, message: Message):
         caption = (f"🎬 **{BRAND_TITLE}**\n\n"
                    f"✂️ Trimmed: `{_seconds_to_hms(start_sec)}` → `{_seconds_to_hms(clip_end)}`\n"
                    f"Duration: `{_seconds_to_hms(clip_len)}`\nSize: `{out_size_mb:.1f} MB`\n"
-                   f"Channel: @{SUPPORT_CHANNEL}\n\n{retention_note}")
+                   f"{retention_note}")
 
         _dest = await _await_upload_choice(user_id, status, f"Trimmed: `{out_size_mb:.1f} MB`")
         if _dest != "cancel":
@@ -8476,7 +8470,7 @@ async def watermark_cmd(client: Client, message: Message):
     if not src_media:
         return await message.reply_text(
             "**Reply to a video** with `/Watermark <text>`.\n\n"
-            "Example: `/Watermark @LittleSinghamChannel`\n\n"
+            "Example: `/Watermark @YourChannelName`\n\n"
             "⚠️ Watermark will appear in the **last 2 minutes** of the video."
         )
 
@@ -8641,7 +8635,6 @@ async def wmp_callback(client: Client, cq: CallbackQuery):
             f"🎨 **Watermark Applied**\n\n"
             f"Watermark: {wm_label}\n"
             f"Size: `{out_mb:.1f} MB` | Duration: `{_seconds_to_hms(int(dur))}`\n"
-            f"Channel: @{SUPPORT_CHANNEL}\n\n"
             f"_Auto-deleted from server after {_retention_label()}._"
         )
         _dest = await _await_upload_choice(uid, status, f"Watermarked: `{out_mb:.1f} MB`")
@@ -8686,7 +8679,7 @@ async def audiotrack_cmd(client: Client, message: Message):
     if not src_media:
         return await message.reply_text(
             "**Reply to a video** with `/audiotrack <name>`.\n\n"
-            "Example: `/audiotrack @LittleSinghamChannel`\n\n"
+            "Example: `/audiotrack @YourChannelName`\n\n"
             "✅ No re-encoding — runs in 2-3 seconds even on large files.\n"
             "🔒 Wipes global metadata, injects your brand into all audio tracks."
         )
@@ -8751,7 +8744,6 @@ async def audiotrack_cmd(client: Client, message: Message):
             f"Global metadata: ❌ Wiped\n"
             f"Re-encoded: ❌ (stream copy)\n"
             f"Size: `{out_mb:.1f} MB`\n"
-            f"Channel: @{SUPPORT_CHANNEL}\n\n"
             f"_Visible in VLC → Track Info, MX Player, Telegram audio selector._\n"
             f"_Auto-deleted from server after {_retention_label()}._"
         )
