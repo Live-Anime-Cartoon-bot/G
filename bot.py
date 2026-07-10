@@ -4143,7 +4143,7 @@ async def split_and_send_video(
             LOG.error("Split part %d/%d failed: %s", i + 1, num_parts, err[-500:])
             continue
 
-        part_caption = caption + f"\n\n📂 **Part {i + 1} / {num_parts}**"
+        part_caption = caption + f"\n\n📂 **Part {i + 1}**"
         try:
             await send_target.reply_video(
                 video=part_path,
