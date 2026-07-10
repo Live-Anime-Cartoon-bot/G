@@ -2019,37 +2019,54 @@ async def do_record(client: Client, query: CallbackQuery, setup: dict):
 
         partial_note = "\n_⚠️ Partial recording (cancelled)_" if was_cancelled else ""
 
-        pending_uploads[(user_id, rec_id)] = {
-            "video_path":    video_path,
-            "thumb_path":    thumb_path if thumb_ok else None,
-            "caption":       caption,
-            "dur":           dur,
-            "chat_id":       chat_id,
-            "save_dir":      save_dir,
-            "was_cancelled": was_cancelled,
-            "filename":      mkv_filename,
-            "send_target":   send_target,
-            "status_msg":    msg,
-            "setup":         setup,
-        }
+        # Auto-upload directly to Telegram — no button prompt
+        try:
+            await msg.edit_text(
+                f"🎉 **Recording Successfully Completed!**\n\n"
+                f"🎬 File Name: `{mkv_filename}`\n"
+                f"📦 Size: `{size_str}`\n"
+                f"⏱ Duration: `{TimeFormatter(dur * 1000)}`"
+                f"{partial_note}\n\n"
+                "⬆️ Uploading to Telegram…"
+            )
+        except Exception:
+            pass
 
-        # Telegram-only upload button
-        buttons = [
-            [
-                InlineKeyboardButton("📤 Telegram", callback_data=f"upl:{user_id}:{rec_id}:tg"),
-            ],
-        ]
-        kb = InlineKeyboardMarkup(buttons)
-
-        await msg.edit_text(
-            f"🎉 **Recording Successfully Completed!**\n\n"
-            f"🎬 File Name: `{mkv_filename}`\n"
-            f"📦 Size: `{size_str}`\n"
-            f"⏱ Duration: `{TimeFormatter(dur * 1000)}`"
-            f"{partial_note}\n\n"
-            "Kripya choose karein aap is file ko kahan upload karna chahte hain:",
-            reply_markup=kb,
+        upload_start = time.time()
+        await split_and_send_video(
+            send_target, video_path, caption, dur,
+            thumb_path=thumb_path if thumb_ok else None,
+            status_msg=msg,
+            progress=progress_for_pyrogram,
+            progress_args=(send_target, upload_start, msg, save_dir, was_cancelled),
+            _uid=user_id, _chat_id=send_target.chat.id,
         )
+
+        if setup.get("auto_mode") and not was_cancelled and dur > 120:
+            try:
+                await msg.edit_text("✂️ Auto mode: generating last 2-minute clip…")
+            except Exception:
+                pass
+            clip_dir  = join(save_dir, "auto_clips")
+            os.makedirs(clip_dir, exist_ok=True)
+            last_clip = join(clip_dir, "last_2min.mkv")
+            last_start = max(0, dur - 120)
+            await runcmd(
+                f'ffmpeg -hide_banner -loglevel error -nostats -y '
+                f'-ss {last_start} -to {dur} -i {shlex.quote(video_path)} '
+                f'-c copy {shlex.quote(last_clip)}'
+            )
+            if os.path.exists(last_clip) and os.path.getsize(last_clip) > 0:
+                try:
+                    await send_target.reply_video(
+                        video=last_clip,
+                        caption=(f"🎬 **{BRAND_TITLE}** — ⏭ Last 2 minute"),
+                        supports_streaming=True,
+                    )
+                except Exception as ce:
+                    LOG.warning(f"Auto clip upload failed: {ce}")
+
+        schedule_retention_cleanup(save_dir)
 
     except Exception as e:
         LOG.error(f"do_record error uid={user_id}: {e}")
@@ -2161,30 +2178,8 @@ def _upload_dest_keyboard(uid: int) -> InlineKeyboardMarkup:
 
 
 async def _await_upload_choice(uid: int, status_msg, info_text: str = "") -> str:
-    """Show upload destination buttons, wait up to 4 min, return 'tg'/'gd'/'both'/'cancel'."""
-    ev   = asyncio.Event()
-    dest = ["tg"]
-    pending_upload_state[uid] = {"ev": ev, "dest": dest}
-    try:
-        await status_msg.edit_text(
-            f"✅ **Processing complete!**\n\n"
-            + (f"{info_text}\n\n" if info_text else "")
-            + "📤 **Select Upload Destination**\n"
-            + "Please choose an upload option within 4 minutes.\n"
-            + "_(Upload option chuniye — 4 minute ke andar)_\n\n"
-            + "⏳ If no button is clicked within 4 minutes, the file will be automatically uploaded to Telegram.\n"
-            + "_(4 minute mein button na dabaya to file automatically Telegram par upload ho jayegi.)_",
-            reply_markup=_upload_dest_keyboard(uid),
-        )
-    except Exception:
-        pass
-    try:
-        await asyncio.wait_for(ev.wait(), timeout=240)
-    except asyncio.TimeoutError:
-        dest[0] = "tg"   # default: Telegram if no response in 4 min
-    finally:
-        pending_upload_state.pop(uid, None)
-    return dest[0]
+    """Always upload to Telegram automatically — no prompt shown."""
+    return "tg"
 
 
 def _upload_task_id(seed) -> str:
