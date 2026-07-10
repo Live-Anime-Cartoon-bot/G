@@ -3967,7 +3967,7 @@ async def progress_for_pyrogram(current, total, message, start, msg,
 # 2 GB auto-split helper
 # ---------------------------------------------------------------------------
 
-TG_MAX_BYTES = 1_950_000_000  # 1.95 GB — safe margin under Telegram's 2 GB hard limit
+TG_MAX_BYTES = 1_980_000_000  # 1.98 GB — safe margin under Telegram's 2 GB hard limit
 
 
 # ---------------------------------------------------------------------------
