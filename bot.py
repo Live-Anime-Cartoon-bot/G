@@ -2033,14 +2033,10 @@ async def do_record(client: Client, query: CallbackQuery, setup: dict):
             "setup":         setup,
         }
 
-        # Always show all 3 upload buttons; Drive guard is handled in the callback
+        # Telegram-only upload button
         buttons = [
             [
-                InlineKeyboardButton("📤 Telegram",       callback_data=f"upl:{user_id}:{rec_id}:tg"),
-                InlineKeyboardButton("☁️ Google Drive",   callback_data=f"upl:{user_id}:{rec_id}:gd"),
-            ],
-            [
-                InlineKeyboardButton("📤+☁️ Upload to Both", callback_data=f"upl:{user_id}:{rec_id}:both"),
+                InlineKeyboardButton("📤 Telegram", callback_data=f"upl:{user_id}:{rec_id}:tg"),
             ],
         ]
         kb = InlineKeyboardMarkup(buttons)
@@ -2157,12 +2153,10 @@ def _make_encode_progress_text(cmd_name: str, pct: float,
 
 
 def _upload_dest_keyboard(uid: int) -> InlineKeyboardMarkup:
-    """Choice buttons shown before upload: Drive / Telegram / Drive + Telegram."""
+    """Choice buttons shown before upload: Telegram only."""
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("☁️ Drive",              callback_data=f"upl_ch:{uid}:gd")],
-        [InlineKeyboardButton("📤 Telegram",            callback_data=f"upl_ch:{uid}:tg")],
-        [InlineKeyboardButton("☁️📤 Drive + Telegram",  callback_data=f"upl_ch:{uid}:both")],
-        [InlineKeyboardButton("❌ Cancel",               callback_data=f"upl_ch:{uid}:cancel")],
+        [InlineKeyboardButton("📤 Telegram", callback_data=f"upl_ch:{uid}:tg")],
+        [InlineKeyboardButton("❌ Cancel",    callback_data=f"upl_ch:{uid}:cancel")],
     ])
 
 
