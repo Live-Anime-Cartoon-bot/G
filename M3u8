@@ -1,0 +1,5 @@
+#EXTINF:-1 tvg-id="559" tvg-name="Pogo" tvg-logo="https://img.media.jio.com/imagespublic/22/35/301584_1707144669257_p_medium.jpg" group-title="Kids",Pogo
+#KODIPROP:inputstream.adaptive.manifest_type=mpd
+--
+#EXTHTTP:{"cookie":"__hdnea__=st=1785398955~exp=1785420555~acl=/bpk-tv/Pogo_Hindi_BTS/WDVLive/*~hmac=b54e5c71604dde91ce2066530749de8692444a6c945045e11e40f9d3c36b8fb0"}
+https://jiotvbpkstb.cdn.jio.com/bpk-tv/Pogo_Hindi_BTS/WDVLive/index.mpd
