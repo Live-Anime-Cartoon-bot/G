@@ -1,7 +1,7 @@
-#EXTINF:-1 tvg-id="2835" tvg-name="Sony WAH" tvg-logo="https://img.media.jio.com/tvpimages/75/37/300269_1753198012625_l_medium.jpg" group-title="Entertainment",Sony WAH
+#EXTINF:-1 tvg-id="559" tvg-name="Pogo" tvg-logo="https://img.media.jio.com/imagespublic/22/35/301584_1707144669257_p_medium.jpg" group-title="Kids",Pogo
 #KODIPROP:inputstream.adaptive.manifest_type=mpd
 #KODIPROP:inputstream.adaptive.license_type=clearkey
-#KODIPROP:inputstream.adaptive.license_key=https://ziotvplus.yowaimo.in/license/2835/
+#KODIPROP:inputstream.adaptive.license_key=https://ziotvplus.yowaimo.in/license/559/
 #EXTVLCOPT:http-user-agent=JioTV.Plus/2.8.4_2076/StreamFlex(StreamFlex;JioSTB) JioTvPlus-AndroidTv
-#EXTHTTP:{"cookie":"__hdnea__=st=1785398882~exp=1785420482~acl=/bpk-tv/Sony_Wah_BTS/WDVLive/*~hmac=c176c38b914fffadcff7b58645b3c0bd40aadeb6a71b0cb777fa854ddf084a1f"}
-https://jiotvbpkstb.cdn.jio.com/bpk-tv/Sony_Wah_BTS/WDVLive/index.mpd
+#EXTHTTP:{"cookie":"__hdnea__=st=1785398955~exp=1785420555~acl=/bpk-tv/Pogo_Hindi_BTS/WDVLive/*~hmac=b54e5c71604dde91ce2066530749de8692444a6c945045e11e40f9d3c36b8fb0"}
+https://jiotvbpkstb.cdn.jio.com/bpk-tv/Pogo_Hindi_BTS/WDVLive/index.mpd
