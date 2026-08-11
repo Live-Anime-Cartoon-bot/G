@@ -246,7 +246,7 @@ CHANNELS_FILE    = join(DATA_DIRECTORY, "channels.json")
 # users; the underlying stream URL is looked up server-side and passed
 # straight to FFmpeg. Never expose these values in any reply text.
 BOT_CHANNELS = {
-    "POGO": "https://ksr.indevs.in/m3u/?stream=475137",
+    "POGO": "https://ranapkz.site/RANAPK33w/TVD/play.php?id=372993",
     "CARTOON NETWORK": "https://ksr.indevs.in/m3u/?stream=475130",
     "DISCOVERY KIDS": "https://ksr.indevs.in/m3u/?stream=475132",
     "DISNEY TV": "https://ksr.indevs.in/m3u/?stream=475134",
@@ -262,7 +262,7 @@ BOT_CHANNELS = {
     "CARTOON NETWORK 2": "http://202.70.146.135:8000/play/a0a8/index.m3u8",
     "CARTOON NETWORK HD+": "http://202.70.146.135:8000/play/a0a3/index.m3u8",
     "DISCOVERY KIDS 3": "http://202.70.146.135:8000/play/a0a6/index.m3u8",
-"Pogo 3": "http://66.102.126.10:8000/play/a00d/index.m3u8",
+"Pogo 3": "https://ksr.indevs.in/m3u/?stream=475137",
 "Nick HD": "http://103.174.195.62:8000/play/a0ch",
 }
 ADMIN_FILE       = join(DATA_DIRECTORY, "admins.json")
