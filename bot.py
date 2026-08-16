@@ -1,11315 +1,9053 @@
 import os
 import json
-import math
-import time
-import logging
-import random
-import secrets as pysecrets
+import gzip
 import re
-import shlex
-import shutil
 import asyncio
+import time
+import shutil
+import tempfile
+import secrets as _secrets
 import hashlib
-from typing import Tuple, Optional
-from os.path import join
-from datetime import datetime, timedelta
-import psutil
-import pytz
+import requests
+import base64
+import logging
+import threading
+import atexit
+import socket
+import subprocess
+import xml.etree.ElementTree as ET
 import yt_dlp
-from hachoir.metadata import extractMetadata
-from hachoir.parser import createParser
-from pyrogram import Client, filters
-from pyrogram.errors import FloodWait
-from pyrogram.types import (
-    Message,
-    CallbackQuery,
-    InlineKeyboardMarkup,
-    InlineKeyboardButton,
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import unquote, urljoin, urlsplit
+from datetime import datetime, timedelta
+from types import SimpleNamespace
+from zoneinfo import ZoneInfo
+from pathlib import Path
+from dotenv import load_dotenv
+from telegram import (
+    Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand, InputFile,
     InputMediaPhoto,
 )
+from telegram.ext import (
+    Application, CommandHandler, MessageHandler,
+    CallbackQueryHandler, TypeHandler, filters, ContextTypes, ApplicationHandlerStop
+)
+from telegram.constants import ParseMode
 
+# Load optional local configuration files before reading any environment values.
+# Replit Secrets and workflow environment variables take precedence over .env.
+# The bot has historically been stored both at the workspace root and inside a
+# nested bot/ directory, so resolve the workspace from whichever layout exists.
+_project_root = Path(__file__).resolve().parent
+if not (_project_root / "attached_assets").exists() and (
+    _project_root.parent / "attached_assets"
+).exists():
+    _project_root = _project_root.parent
+load_dotenv(_project_root / ".env", override=False)
+load_dotenv(Path(__file__).resolve().parent / ".env", override=False)
 
-# ---------------------------------------------------------------------------
-# Configuration (merged from config.py)
-# ---------------------------------------------------------------------------
-try:
-    from dotenv import load_dotenv as _load_dotenv
-    import os as _os_tmp
-    _env_file = _os_tmp.path.join(_os_tmp.path.dirname(__file__), ".env")
-    if _os_tmp.path.exists(_env_file):
-        _load_dotenv(_env_file)
-    del _os_tmp, _env_file
-except ImportError:
-    pass
-
-from os import environ as _environ
-
-def _parse_id_list(name: str, raw: str) -> list:
-    ids, bad = [], []
-    for tok in (raw or "").replace(",", " ").split():
-        tok = tok.strip()
-        if not tok:
-            continue
-        try:
-            ids.append(int(tok))
-        except ValueError:
-            bad.append(tok)
-    if bad:
-        import logging as _lg
-        _lg.getLogger(__name__).warning(
-            "%s contains non-numeric values that were skipped: %s.", name, bad)
-    return ids
-
-def _parse_int(name: str, raw: str) -> int:
-    try:
-        return int((raw or "0").strip())
-    except ValueError:
-        import logging as _lg
-        _lg.getLogger(__name__).error("%s must be an integer, got: %r", name, raw)
-        return 0
-
-API_ID        = _parse_int("API_ID",    _environ.get("API_ID", "0"))
-API_HASH      = _environ.get("API_HASH",    "")
-BOT_TOKEN     = _environ.get("BOT_TOKEN",   "")
-
-AUTH_USERS    = _parse_id_list("AUTH_USERS", _environ.get("AUTH_USERS", ""))
-OWNER_IDS     = _parse_id_list("OWNER_IDS",  _environ.get("OWNER_IDS",  ""))
-
-_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-
-
-def _resolve_dir(env_key: str, *rel_parts: str) -> str:
-    """Return env var if set, else script-relative path, else /tmp fallback.
-    Falls back to /tmp automatically on read-only filesystems (e.g. Railway)."""
-    from_env = _environ.get(env_key, "")
-    if from_env:
-        return from_env
-    primary = os.path.join(_SCRIPT_DIR, *rel_parts)
-    try:
-        os.makedirs(primary, exist_ok=True)
-        _t = os.path.join(primary, ".write_test")
-        open(_t, "w").close()
-        os.remove(_t)
-        return primary
-    except (OSError, IOError):
-        fallback = os.path.join("/tmp", "ls_bot", *rel_parts)
-        import logging as _lg
-        _lg.getLogger(__name__).warning(
-            "%s: primary path %r is not writable, using /tmp fallback: %r",
-            env_key, primary, fallback,
-        )
-        return fallback
-
-
-DOWNLOAD_DIRECTORY  = _resolve_dir("DOWNLOAD_DIRECTORY",  "bot", "downloads")
-DATA_DIRECTORY      = _resolve_dir("DATA_DIRECTORY",       "bot", "data")
-COOKIES_DIRECTORY   = _resolve_dir("COOKIES_DIRECTORY",    "bot", "data", "cookies")
-
-RETENTION_HOURS     = _parse_int("RETENTION_HOURS", _environ.get("RETENTION_HOURS", "3"))
-
-DEFAULT_METADATA    = _environ.get("DEFAULT_METADATA",    "")
-DEFAULT_FILENAME    = _environ.get("DEFAULT_FILENAME",    "Anime Cartoon")
-DEFAULT_REC_DURATION = _environ.get("DEFAULT_REC_DURATION", "01:00:00")
-BRAND_TITLE         = _environ.get("BRAND_TITLE",         "Anime Cartoon")
-
-TIMEZONE            = _environ.get("TIMEZONE",            "Asia/Kolkata")
-
-SUPPORT_USERNAME    = _environ.get("SUPPORT_USERNAME",    "LS_Owner_bot")
-SUPPORT_CHANNEL     = _environ.get("SUPPORT_CHANNEL",     "LS_Owner_bot")
-
-GROUP_CHAT_ID       = _parse_int("GROUP_CHAT_ID",  _environ.get("GROUP_CHAT_ID",  "0"))
-GROUP_INVITE_LINK   = _environ.get("GROUP_INVITE_LINK", "https://t.me/+ww77CDQwoigzYjk1")
-
-SHRINKME_API_KEY    = _environ.get("SHORTXLINKS_API_KEY", _environ.get("SHRINKME_API_KEY", ""))
-BOT_USERNAME        = _environ.get("BOT_USERNAME",        "LittlesinghamMovie_Bot")
-
-GDRIVE_SA_JSON      = _environ.get("GDRIVE_SA_JSON",      "")
-GDRIVE_FOLDER_ID    = _environ.get("GDRIVE_FOLDER_ID",    "")
-GOOGLE_CLIENT_ID    = _environ.get("GOOGLE_CLIENT_ID",    "")
-GOOGLE_CLIENT_SECRET = _environ.get("GOOGLE_CLIENT_SECRET", "")
-
-# ---------------------------------------------------------------------------
-
-tz = pytz.timezone(TIMEZONE)
-
-
-def tz_time(*args):
-    return datetime.now(tz).timetuple()
-
-
-logging.Formatter.converter = tz_time
 logging.basicConfig(
-    level=logging.INFO,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    datefmt="%d-%m-%Y %I:%M:%S %p " + tz.tzname(datetime.now()),
+    level=logging.INFO
 )
-LOG = logging.getLogger(__name__)
+logger = logging.getLogger(__name__)
+# PTB/httpx INFO logs include the Bot API URL, which contains the bot token.
+# Keep request URLs out of workflow logs, especially when using the local API.
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
+logging.getLogger("telegram.request").setLevel(logging.WARNING)
 
-# ---------------------------------------------------------------------------
-# Directory setup
-# ---------------------------------------------------------------------------
+BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
+BOT_OWNER_ID = os.environ.get("BOT_OWNER_ID")
+API_ID = os.environ.get("API_ID")
+API_HASH = os.environ.get("API_HASH")
+DATA_FOLDER = "app/assets/data"
+USER_DATA_FILE = "user_data.json"
+ADMINS_FILE = "admins.json"
+VERIFY_TOKENS_FILE = "verify_tokens.json"
+PREMIUM_FILE = "premium_users.json"
+AUDIO_TRACK_SETTINGS_FILE = "audio_track_settings.json"
+BOT_MODE_FILE = "bot_mode_scheduled_premium.json"
+SCHEDULED_RECORDINGS_FILE = os.environ.get(
+    "SCHEDULED_RECORDINGS_FILE", "scheduled_recordings.json"
+)
+COOKIES_FOLDER = os.path.join(DATA_FOLDER, "cookies")
+MAX_COOKIE_FILE_BYTES = 2 * 1024 * 1024
+COOKIE_UPLOAD_TTL_SECONDS = 5 * 60
+WATERMARK_URL = os.environ.get("WATERMARK_URL") or "https://iili.io/Cew1rV1.png"
+# Second DishTV watermark — shown only in the last 2 minutes when last_2min is on.
+DISHTV_WM2_URL = os.environ.get("DISHTV_WM2_URL") or "https://iili.io/CuMJCjn.md.png"
+OTT_WATERMARK_URL = (
+    os.environ.get("OTT_WATERMARK_URL")
+    or "https://iili.io/CuMJCjn.md.png"
+)
+WATERMARK_CACHE_FILE = os.environ.get(
+    "WATERMARK_CACHE_FILE", "/tmp/dishtv_smart_watermark.png"
+)
+WATERMARK_POSITION_FILE = "watermark_settings.json"
+OTT_WATERMARK_POSITION_FILE = "ott_watermark_settings.json"
+PLAYLIST_URL = os.environ.get(
+    "PLAYLIST_URL",
+    "https://raw.githubusercontent.com/Sflex0719/m3u/refs/heads/main/Zio.m3u"
+)
+AIRTEL_PLAYLIST_FILE = os.environ.get(
+    "AIRTEL_PLAYLIST_FILE",
+    "",
+)
+AIRTEL_PLAYLIST_URL = os.environ.get(
+    "AIRTEL_PLAYLIST_URL",
+    "https://raw.githubusercontent.com/LittleSingham1/M3u8/refs/heads/main/Airtel_Selected_Channel_Links.txt",
+).strip()
+SUNNXT_PLAYLIST_URL = os.environ.get(
+    "SUNNXT_PLAYLIST_URL",
+    "https://mahabuburbd.netlify.app/sun-next.m3u",
+).strip()
+AIRTEL_WATERMARK_FILE = os.environ.get(
+    "AIRTEL_WATERMARK_FILE",
+    str(_project_root / "attached_assets" / "airtel_watermark.png"),
+)
+# Image overlaid only in the last 2 minutes of every Airtel recording.
+# Airtel watermark (airtel_watermark.png) is NOT added for Airtel channels.
+AIRTEL_LAST2MIN_OVERLAY_URL = os.environ.get(
+    "AIRTEL_LAST2MIN_OVERLAY_URL",
+    "https://iili.io/CuMJCjn.md.png",
+)
+_tz = os.environ.get("TIMEZONE", "Asia/Kolkata")
+IST = ZoneInfo(_tz)
 
-os.makedirs(DATA_DIRECTORY, exist_ok=True)
-os.makedirs(DOWNLOAD_DIRECTORY, exist_ok=True)
-FAILED_UPLOADS_DIR = join(DATA_DIRECTORY, "failed_uploads")
-os.makedirs(FAILED_UPLOADS_DIR, exist_ok=True)
-os.makedirs(COOKIES_DIRECTORY, exist_ok=True)
+REC_LIMIT_SECONDS = int(os.environ.get("REC_LIMIT_SECONDS", "3000"))
+VERIFICATION_EXPIRY_SECONDS = int(os.environ.get("VERIFICATION_EXPIRY_SECONDS", "2400"))
+RECORDING_TIMEOUT_GRACE_SECONDS = max(
+    10, int(os.environ.get("RECORDING_TIMEOUT_GRACE_SECONDS", "20"))
+)
+RECORDING_STALL_TIMEOUT_SECONDS = max(
+    8, int(os.environ.get("RECORDING_STALL_TIMEOUT_SECONDS", "15"))
+)
+SHORTLINK_URL = os.environ.get("SHORTLINK_URL", "https://shortxlinks.in")
+SHORTLINK_API = os.environ.get("SHORTLINK_API", "")
+WORKING_GROUP = os.environ.get("WORKING_GROUP") or "-1003726271113"
+GROUP_LINK = os.environ.get("GROUP_LINK") or "https://t.me/+-IByJV2DtJhmODBl"
+BOTUSERNAME = os.environ.get("BOTUSERNAME", "")
+MAX_PROCESSES = int(os.environ.get("MAX_PROCESSES", "5"))
+PAID_BOT_CONTACT = os.environ.get("PAID_BOT_CONTACT", "@LS_Ower_bot")
+DEFAULT_AUDIO_MODE = "multi"
 
-RETENTION_SECONDS = max(int(RETENTION_HOURS), 0) * 3600
-
-# ---------------------------------------------------------------------------
-# Retention helpers
-# ---------------------------------------------------------------------------
-
-def _retention_label() -> str:
-    h = RETENTION_HOURS
-    if h <= 0:
-        return "immediately"
-    if h == 1:
-        return "1 hour"
-    return f"{h} hours"
-
-
-def _safe_rmtree(path: str) -> None:
-    try:
-        if path and os.path.isdir(path):
-            shutil.rmtree(path)
-            LOG.info(f"Auto-deleted recording directory: {path}")
-    except Exception as e:
-        LOG.warning(f"Failed to remove {path}: {e}")
+def _parse_group_ids(value):
+    """Parse a comma/space-separated group allowlist into Telegram IDs."""
+    return {
+        int(item)
+        for item in re.split(r"[\s,]+", value or "")
+        if item and re.fullmatch(r"-?\d+", item)
+    }
 
 
-async def _schedule_cleanup(path: str, delay_seconds: int) -> None:
-    if not path:
-        return
-    if delay_seconds <= 0:
-        _safe_rmtree(path)
-        return
-    try:
-        await asyncio.sleep(delay_seconds)
-    except asyncio.CancelledError:
-        return
-    _safe_rmtree(path)
+# Only configured working groups are allowed. The requested working group is
+# the default when WORKING_GROUP is not set; private chats remain unaffected.
+AUTHORIZED_GROUP_IDS = _parse_group_ids(WORKING_GROUP)
+UNAUTHORIZED_GROUP_IDS = set()
+_GROUP_LEAVE_IN_PROGRESS = set()
+
+# Active process slot counter
+_active_processes = 0
+
+# Cancellable recordings: {cancel_id: proc}
+ACTIVE_RECORDINGS = {}
+PENDING_RECORDINGS = {}
+QUALITY_PENDING = {}
+QUALITY_PENDING_TTL = 15 * 60
+MERGE_PENDING = {}
+MERGE_PENDING_TTL = 15 * 60
+
+# ── Recording progress tracking ───────────────
+# {session_id: current proc} — constant across retries, keyed by session
+RECORDING_SESSION_PROC: dict = {}
+# {session_id: {...progress data...}} — updated live for ⚡ Progress popup
+RECORDING_PROGRESS_INFO: dict = {}
+# {session_id: asyncio.Task} — auto-updater tasks
+ACTIVE_UPDATERS: dict = {}
+MEDIA_USER_TASKS: dict = {}
+MEDIA_MERGE_SESSIONS: dict = {}
+STREAM_EXTRACTOR_PENDING: dict = {}
+PENDING_COOKIE_UPLOADS: dict[int, float] = {}
+SCREENSHOT_PENDING: dict[str, dict] = {}
+DEFAULT_AUDIO_PENDING: dict[str, dict] = {}
+SCHEDULED_RECORDINGS: list[dict] = []
+SCHEDULE_RUNTIME_TASKS: dict[str, asyncio.Task] = {}
+SCHEDULE_MANAGER_TASK = None
+
+TELEGRAM_LOCAL_API_URL = os.environ.get("TELEGRAM_LOCAL_API_URL", "").rstrip("/")
+TELEGRAM_LOCAL_API_ENABLED = bool(TELEGRAM_LOCAL_API_URL)
+TELEGRAM_BOT_DOWNLOAD_LIMIT = (
+    2 * 1024 * 1024 * 1024 if TELEGRAM_LOCAL_API_ENABLED else 20 * 1024 * 1024
+)
+TELEGRAM_BOT_UPLOAD_LIMIT = (
+    2 * 1024 * 1024 * 1024 if TELEGRAM_LOCAL_API_ENABLED else 50 * 1024 * 1024
+)
+# 8081 is used by the existing mockup preview service in this workspace.
+TELEGRAM_LOCAL_API_PORT = int(os.environ.get("TELEGRAM_LOCAL_API_PORT", "8090"))
+_LOCAL_TELEGRAM_API_PROCESS = None
 
 
-def schedule_retention_cleanup(path: str) -> None:
-    if not path:
-        return
-    try:
-        loop = asyncio.get_event_loop()
-        loop.create_task(_schedule_cleanup(path, RETENTION_SECONDS))
-        LOG.info(
-            f"Scheduled cleanup of {path} in {_retention_label()}"
-            if RETENTION_SECONDS > 0
-            else f"Scheduled immediate cleanup of {path}"
+def _start_local_telegram_api():
+    """Start the local Bot API server when API credentials are available.
+
+    The official cloud Bot API cannot download files larger than 20 MB. The
+    local server supports the 2 GB limits and is started as a child of this
+    existing bot workflow, so no second user-managed workflow is required.
+    Credentials are passed through the child environment rather than command
+    arguments or logs.
+    """
+    global TELEGRAM_LOCAL_API_URL
+    global TELEGRAM_LOCAL_API_ENABLED
+    global TELEGRAM_BOT_DOWNLOAD_LIMIT
+    global TELEGRAM_BOT_UPLOAD_LIMIT
+    global _LOCAL_TELEGRAM_API_PROCESS
+
+    if TELEGRAM_LOCAL_API_URL:
+        return True
+    if not API_ID or not API_HASH:
+        logger.warning(
+            "Local Telegram Bot API disabled: API_ID/API_HASH are not configured."
         )
-    except RuntimeError:
-        _safe_rmtree(path)
-
-
-def sweep_old_downloads() -> None:
-    try:
-        if not os.path.isdir(DOWNLOAD_DIRECTORY):
-            return
-        cutoff = time.time() - RETENTION_SECONDS
-        removed = 0
-        for entry in os.listdir(DOWNLOAD_DIRECTORY):
-            full = join(DOWNLOAD_DIRECTORY, entry)
-            try:
-                mtime = os.path.getmtime(full)
-            except OSError:
-                continue
-            if mtime < cutoff:
-                if os.path.isdir(full):
-                    _safe_rmtree(full)
-                else:
-                    try:
-                        os.remove(full)
-                    except OSError as e:
-                        LOG.warning(f"Failed to remove {full}: {e}")
-                removed += 1
-        if removed:
-            LOG.info(f"Startup sweep removed {removed} expired recording entries")
-    except Exception as e:
-        LOG.error(f"sweep_old_downloads failed: {e}")
-
-
-# ---------------------------------------------------------------------------
-# JSON storage helpers
-# ---------------------------------------------------------------------------
-
-VERIFIED_FILE    = join(DATA_DIRECTORY, "verified.json")
-PLANS_FILE       = join(DATA_DIRECTORY, "plans.json")
-CHANNELS_FILE    = join(DATA_DIRECTORY, "channels.json")
-
-# Static hidden-URL channel map — only the display names are ever shown to
-# users; the underlying stream URL is looked up server-side and passed
-# straight to FFmpeg. Never expose these values in any reply text.
-BOT_CHANNELS = {
-    "POGO": "https://ranapkz.site/RANAPK33w/TVD/play.php?id=372993",
-    "CARTOON NETWORK": "https://ksr.indevs.in/m3u/?stream=475130",
-    "DISCOVERY KIDS": "https://ksr.indevs.in/m3u/?stream=475132",
-    "DISNEY TV": "https://ksr.indevs.in/m3u/?stream=475134",
-    "NICK": "https://ksr.indevs.in/m3u/?stream=475136",
-    "HUNGAMA": "https://ksr.indevs.in/m3u/?stream=475135",
-    "SONIC": "https://ksr.indevs.in/m3u/?stream=475138",
-    "NICK JR": "https://ksr.indevs.in/m3u/?stream=476786",
-    "MINIX": "https://vodzong.mjunoon.tv:8087/streamtest/157-1M/chunks.m3u8",
-    "POGO 2": "http://line.sweetv.xyz/play/live.php?mac=00:1A:79:00:03:B2&stream=156128&extension=ts&play_token=9sBGXoBcMI",
-    "DISCOVERY KIDS 2": "http://line.sweetv.xyz/play/live.php?mac=00:1A:79:00:03:B2&stream=1540017&extension=ts&play_token=eFCOqzrsPI",
-    "DISNEY CHANNEL": "http://103.155.18.191:8000/play/a01q/index.m3u8",
-    "NICK 2": "http://103.155.18.191:8000/play/a04c/index.m3u8",
-    "CARTOON NETWORK 2": "http://202.70.146.135:8000/play/a0a8/index.m3u8",
-    "CARTOON NETWORK HD+": "http://202.70.146.135:8000/play/a0a3/index.m3u8",
-    "DISCOVERY KIDS 3": "http://202.70.146.135:8000/play/a0a6/index.m3u8",
-"Pogo 3": "https://ksr.indevs.in/m3u/?stream=475137",
-"Nick HD": "http://103.174.195.62:8000/play/a0ch",
-}
-ADMIN_FILE       = join(DATA_DIRECTORY, "admins.json")
-PREMIUM_FILE     = join(DATA_DIRECTORY, "premium.json")
-AUDIO_NAME_FILE     = join(DATA_DIRECTORY, "audio_brand_name.txt")
-WATERMARK_NAME_FILE    = join(DATA_DIRECTORY, "watermark_name.txt")
-WATERMARK_IMG_FILE     = join(DATA_DIRECTORY, "watermark_img.txt")
-WATERMARK_SIZE_FILE    = join(DATA_DIRECTORY, "watermark_size.txt")
-WATERMARK_IMG_CACHE    = join(DATA_DIRECTORY, "watermark_logo.png")
-DEFAULT_WATERMARK_IMG_URL = "https://iili.io/CuMJCjn.md.png"
-GROUP_CONFIG_FILE   = join(DATA_DIRECTORY, "group_config.json")
-
-# Runtime-mutable group ID (persists to GROUP_CONFIG_FILE)
-# File overrides the env var so owner can update without redeploying.
-try:
-    with open(GROUP_CONFIG_FILE, "r") as _gcf:
-        _gcd = json.load(_gcf)
-        if _gcd.get("group_chat_id"):
-            GROUP_CHAT_ID = int(_gcd["group_chat_id"])
-        if _gcd.get("group_invite_link"):
-            GROUP_INVITE_LINK = _gcd["group_invite_link"]
-except Exception:
-    pass   # use env-var values already set above
-
-
-def _save_group_config():
-    """Persist current GROUP_CHAT_ID and GROUP_INVITE_LINK to disk."""
-    try:
-        with open(GROUP_CONFIG_FILE, "w") as _f:
-            json.dump({
-                "group_chat_id":   GROUP_CHAT_ID,
-                "group_invite_link": GROUP_INVITE_LINK,
-            }, _f)
-    except Exception as _e:
-        pass
-
-
-def get_default_watermark() -> str:
-    """Return saved default watermark text, fallback to BRAND_TITLE."""
-    try:
-        with open(WATERMARK_NAME_FILE, "r", encoding="utf-8") as fh:
-            v = fh.read().strip()
-            if v:
-                return v
-    except FileNotFoundError:
-        pass
-    return BRAND_TITLE
-
-
-def set_default_watermark(name: str) -> None:
-    """Persist default watermark text to disk (takes effect on next recording)."""
-    with open(WATERMARK_NAME_FILE, "w", encoding="utf-8") as fh:
-        fh.write(name.strip())
-
-
-def get_default_watermark_img_url() -> str:
-    try:
-        with open(WATERMARK_IMG_FILE, "r", encoding="utf-8") as fh:
-            v = fh.read().strip()
-            if v:
-                return v
-    except FileNotFoundError:
-        pass
-    return DEFAULT_WATERMARK_IMG_URL
-
-
-def set_default_watermark_img_url(url: str) -> None:
-    with open(WATERMARK_IMG_FILE, "w", encoding="utf-8") as fh:
-        fh.write(url.strip())
-    if os.path.exists(WATERMARK_IMG_CACHE):
-        try:
-            os.remove(WATERMARK_IMG_CACHE)
-        except Exception:
-            pass
-
-
-def get_watermark_size() -> int:
-    """Return saved watermark logo width in pixels, default 250."""
-    try:
-        with open(WATERMARK_SIZE_FILE, "r", encoding="utf-8") as fh:
-            v = fh.read().strip()
-            if v.isdigit():
-                return max(20, min(int(v), 500))
-    except FileNotFoundError:
-        pass
-    return 250
-
-
-def set_watermark_size(px: int) -> None:
-    """Persist watermark logo width to disk."""
-    with open(WATERMARK_SIZE_FILE, "w", encoding="utf-8") as fh:
-        fh.write(str(max(20, min(px, 500))))
-
-
-def _watermark_img_path() -> str | None:
-    """Return local cache path of watermark image if it exists on disk, else None."""
-    return WATERMARK_IMG_CACHE if os.path.exists(WATERMARK_IMG_CACHE) else None
-
-
-async def _async_ensure_watermark_img() -> bool:
-    """Download watermark image to local cache (idempotent). Returns True if available."""
-    if os.path.exists(WATERMARK_IMG_CACHE) and os.path.getsize(WATERMARK_IMG_CACHE) > 0:
-        return True
-    url = get_default_watermark_img_url()
-    rc, _, _err = await runcmd(
-        f'curl -L -s --max-time 20 -o {shlex.quote(WATERMARK_IMG_CACHE)} {shlex.quote(url)}'
-    )
-    ok = rc == 0 and os.path.exists(WATERMARK_IMG_CACHE) and os.path.getsize(WATERMARK_IMG_CACHE) > 0
-    if not ok:
-        LOG.warning("Watermark image download failed: %s", _err[:300])
-    return ok
-
-
-def get_audio_brand_name() -> str:
-    """Return saved audio brand name, fallback to BRAND_TITLE."""
-    try:
-        with open(AUDIO_NAME_FILE, "r", encoding="utf-8") as fh:
-            v = fh.read().strip()
-            if v:
-                return v
-    except FileNotFoundError:
-        pass
-    return BRAND_TITLE
-
-
-def set_audio_brand_name(name: str) -> None:
-    """Persist audio brand name to disk (takes effect on next recording)."""
-    with open(AUDIO_NAME_FILE, "w", encoding="utf-8") as fh:
-        fh.write(name.strip())
-
-
-def _load_json(path: str, default):
-    try:
-        if not os.path.exists(path):
-            return default
-        with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception as e:
-        LOG.warning(f"Failed to load {path}: {e}")
-        return default
-
-
-def _save_json(path: str, data) -> None:
-    try:
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2, default=str)
-    except Exception as e:
-        LOG.error(f"Failed to save {path}: {e}")
-
-
-def load_verified() -> dict:
-    return _load_json(VERIFIED_FILE, {"verified": {}, "pending": {}})
-
-
-def save_verified(data: dict) -> None:
-    _save_json(VERIFIED_FILE, data)
-
-
-def is_verified(user_id: int) -> bool:
-    if user_id in OWNER_IDS:
-        return True
-    if is_admin(user_id):
-        return True
-    data = load_verified()
-    entry = data.get("verified", {}).get(str(user_id))
-    if not entry:
         return False
-    expires = entry.get("expires_at")
-    if expires:
+
+    try:
+        os.makedirs("/tmp/telegram-bot-api", exist_ok=True)
+        os.makedirs("/tmp/telegram-bot-api-tmp", exist_ok=True)
+        child_env = os.environ.copy()
+        child_env["TELEGRAM_API_ID"] = str(API_ID)
+        child_env["TELEGRAM_API_HASH"] = str(API_HASH)
+        _LOCAL_TELEGRAM_API_PROCESS = subprocess.Popen(
+            [
+                "telegram-bot-api",
+                "--local",
+                f"--http-port={TELEGRAM_LOCAL_API_PORT}",
+                "--http-ip-address=127.0.0.1",
+                "--dir=/tmp/telegram-bot-api",
+                "--temp-dir=/tmp/telegram-bot-api-tmp",
+                "--verbosity=1",
+            ],
+            env=child_env,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except Exception as exc:
+        logger.warning("Local Telegram Bot API start failed: %s", exc)
+        _LOCAL_TELEGRAM_API_PROCESS = None
+        return False
+
+    deadline = time.monotonic() + 15
+    while time.monotonic() < deadline:
+        if _LOCAL_TELEGRAM_API_PROCESS.poll() is not None:
+            logger.warning(
+                "Local Telegram Bot API exited during startup (code %s).",
+                _LOCAL_TELEGRAM_API_PROCESS.returncode,
+            )
+            _LOCAL_TELEGRAM_API_PROCESS = None
+            return False
         try:
-            exp_dt = datetime.fromisoformat(expires)
-            if datetime.now(tz) > exp_dt:
-                return False
-        except Exception:
-            return True
+            with socket.create_connection(
+                ("127.0.0.1", TELEGRAM_LOCAL_API_PORT), timeout=0.5
+            ):
+                break
+        except OSError:
+            time.sleep(0.25)
+    else:
+        logger.warning("Local Telegram Bot API did not open its port in time.")
+        _LOCAL_TELEGRAM_API_PROCESS.terminate()
+        _LOCAL_TELEGRAM_API_PROCESS = None
+        return False
+
+    TELEGRAM_LOCAL_API_URL = (
+        f"http://127.0.0.1:{TELEGRAM_LOCAL_API_PORT}"
+    )
+    TELEGRAM_LOCAL_API_ENABLED = True
+    TELEGRAM_BOT_DOWNLOAD_LIMIT = 2 * 1024 * 1024 * 1024
+    TELEGRAM_BOT_UPLOAD_LIMIT = 2 * 1024 * 1024 * 1024
+    logger.info("Local Telegram Bot API enabled; file limit 2 GB.")
     return True
 
 
-def load_plans() -> list:
-    default = [
-        {"name": "Free Trial",  "price": "Free",          "duration": "3 days",
-         "features": ["Up to 3 recordings", "Max 30 minutes per recording", "Standard quality (MKV)"]},
-        {"name": "Basic",       "price": "$5 / month",    "duration": "30 days",
-         "features": ["Unlimited recordings", "Max 2 hours per recording", "Original quality preserved", "Email support"]},
-        {"name": "Pro",         "price": "$12 / month",   "duration": "30 days",
-         "features": ["Unlimited recordings", "Max 6 hours per recording", "Original quality + auto-thumbnails", "Priority support", "Early access to new channels"]},
-        {"name": "Lifetime",    "price": "$99 one-time",  "duration": "Forever",
-         "features": ["Everything in Pro", "Lifetime access", "Custom channel requests", "Direct support line"]},
-    ]
-    return _load_json(PLANS_FILE, default)
+def _stop_local_telegram_api():
+    process = _LOCAL_TELEGRAM_API_PROCESS
+    if process and process.poll() is None:
+        process.terminate()
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.kill()
 
 
-def load_channels() -> dict:
-    return _load_json(CHANNELS_FILE, {"categories": {}})
+atexit.register(_stop_local_telegram_api)
+
+_channel_cache = None          # list of channel dicts
+_channel_cache_ts = 0          # unix timestamp of last fetch
+_airtel_channel_cache = None
+_airtel_channel_cache_ts = 0
+_sunnxt_channel_cache = None
+_sunnxt_channel_cache_ts = 0
+_CHANNEL_CACHE_TTL = 48 * 60   # refresh playlist every 48 minutes
+_authenticated_stream_cache = {}
+_AUTHENTICATED_STREAM_CACHE_TTL = 90
+
+def _load_json(path, default=None):
+    if os.path.exists(path):
+        with open(path, "r") as f:
+            return json.load(f)
+    return default if default is not None else {}
+
+def _save_json(path, data):
+    with open(path, "w") as f:
+        json.dump(data, f, indent=2)
 
 
-# ---------------------------------------------------------------------------
-# Pyrogram client
-# ---------------------------------------------------------------------------
+BOT_MODE = "public"
 
-app = Client(
-    "recorder",
-    bot_token=BOT_TOKEN,
-    api_id=API_ID,
-    api_hash=API_HASH,
-    workdir=DATA_DIRECTORY,
-    sleep_threshold=60,               # auto-sleep on FloodWait ≤60s
-    max_concurrent_transmissions=8,   # parallel upload chunks
+
+def load_bot_mode():
+    """Load the persistent public/private bot mode and create its file if needed."""
+    global BOT_MODE
+    try:
+        data = _load_json(BOT_MODE_FILE, {"bot_mode": "public"})
+    except (OSError, json.JSONDecodeError, TypeError, AttributeError):
+        data = {"bot_mode": "public"}
+    mode = str(data.get("bot_mode", "public")).strip().lower()
+    if mode not in {"public", "private"}:
+        mode = "public"
+    BOT_MODE = mode
+    _save_json(BOT_MODE_FILE, {"bot_mode": BOT_MODE})
+    return BOT_MODE
+
+
+def save_bot_mode(mode):
+    """Persist the owner-selected public/private bot mode."""
+    global BOT_MODE
+    BOT_MODE = mode if mode in {"public", "private"} else "public"
+    _save_json(BOT_MODE_FILE, {"bot_mode": BOT_MODE})
+
+
+_DEFAULT_AUDIO_LABEL = "LittleSinghamChannel"
+_DEFAULT_AUDIO_LANGUAGE_LABELS = {
+    "english": "LittleSinghamChannel",
+    "hindi": "LittleSinghamChannel",
+    "telugu": "LittleSinghamChannel",
+    "kannada": "LittleSinghamChannel",
+    "tamil": "Anime Cartoon",
+    "malayalam": "Anime Cartoon",
+    "marathi": "Anime Cartoon",
+}
+
+
+def _clean_audio_label(value: object, fallback: str = _DEFAULT_AUDIO_LABEL) -> str:
+    """Normalize a configured audio label before passing it to FFmpeg."""
+    label = re.sub(r"\s+", " ", str(value or "").strip()).replace("\x00", "")
+    return label[:100] or fallback
+
+
+def get_audio_track_settings() -> dict:
+    """Load persistent audio labels, retaining the requested language mapping."""
+    settings = _load_json(AUDIO_TRACK_SETTINGS_FILE, {})
+    labels = dict(_DEFAULT_AUDIO_LANGUAGE_LABELS)
+    stored_labels = settings.get("language_labels")
+    if isinstance(stored_labels, dict):
+        for language, label in stored_labels.items():
+            language_key = str(language).strip().lower()
+            if language_key in labels:
+                labels[language_key] = _clean_audio_label(
+                    label, labels[language_key]
+                )
+    return {
+        "default_label": _clean_audio_label(
+            settings.get("default_label"), _DEFAULT_AUDIO_LABEL
+        ),
+        "apply_default_to_all": bool(settings.get("apply_default_to_all", False)),
+        "language_labels": labels,
+    }
+
+
+def save_default_audio_label(label: str) -> None:
+    """Persist the owner-selected fallback label for future media processing."""
+    settings = get_audio_track_settings()
+    settings["default_label"] = _clean_audio_label(label)
+    settings["apply_default_to_all"] = True
+    _save_json(AUDIO_TRACK_SETTINGS_FILE, settings)
+
+
+def _audio_label_for_language(language_name: str) -> str:
+    """Resolve the configured display label for one detected audio language."""
+    settings = get_audio_track_settings()
+    if settings["apply_default_to_all"]:
+        return settings["default_label"]
+    language_key = str(language_name or "").strip().lower()
+    return _clean_audio_label(
+        settings["language_labels"].get(language_key)
+        or settings["default_label"]
+    )
+
+
+_AUDIO_TRACK_COMPATIBILITY_NOTE = (
+    "🎵 Audio tracks are fully compatible with VLC, MX Player, Telegram, "
+    "and other media players.\n\n"
+    "📌 Track names are visible in:\n"
+    "• VLC → Track Information\n"
+    "• MX Player → Audio Tracks\n"
+    "• Telegram → Audio Selector"
 )
 
-# ---------------------------------------------------------------------------
-# Shared runtime state
-# ---------------------------------------------------------------------------
 
-user_status:        dict = {}
-user_tasks:         dict = {}
-rec_setup_sessions: dict = {}   # user_id -> setup dict
-_wm_text_pending:   set  = set()
-user_ffmpeg_pids:   dict = {}
-progress_tasks:     dict = {}
-cancelled_users:    set  = set()
+WATERMARK_PRESET_MODES = ("left", "right", "top_center", "center", "left_bottom")
 
-MAX_CONCURRENT_REC  = 5
-active_recs:        dict = {}   # {user_id: {rec_id: {"status", "ffmpeg_pid", "progress_task", "start"}}}
-cancelled_recs:     set  = set()  # set of (user_id, rec_id)
-pending_uploads:    dict = {}   # {(user_id, rec_id): upload state dict}
-pending_cookies_users: dict = {}
-ott_progress:       dict = {}
-ott_sessions:       dict = {}   # {user_id: {url, filename, fmt, audio_lang, msg}}
-user_dl_prefs:      dict = {}   # {user_id: {"default_audio_lang": "tamil"/"hindi"/"eng"/…}}
-pending_upload_state: dict = {}  # {user_id: upload-choice state for /trim /merge /watermark /download}
-_wm_pos_sessions:   dict = {}   # {user_id: {src_msg, wm_text, pos, status_msg}}
-compress_jobs:      dict = {}
-reclink_jobs:       dict = {}
-ss_jobs:            dict = {}
-ffmpeg_jobs:        dict = {}   # task_id -> job state for /ffmpeg task mode
-merge_sessions:     dict = {}
-title_jobs:         dict = {}
-relay_map:          dict = {}   # {forwarded_msg_id_in_owner_chat: original_user_id}
-relay_enabled:      bool = True # owner can toggle via /relay on|off
-relay_blocked:      set  = set() # user IDs blocked from relay via /DM <id> delete
+def get_watermark_position():
+    """Return the configured watermark mode and offset in pixels."""
+    settings = _load_json(WATERMARK_POSITION_FILE, {})
+    mode = settings.get("mode", "right")
+    if mode not in WATERMARK_PRESET_MODES:
+        mode = "right"
+    try:
+        offset = max(0, int(settings.get("offset", 70)))
+    except (TypeError, ValueError):
+        offset = 70
+    return mode, offset
 
-_BOT_START_TIME: float = time.time()  # for uptime display
+def save_watermark_position(mode, offset=0):
+    settings = get_watermark_settings()
+    settings["mode"] = mode
+    settings["offset"] = int(offset)
+    _save_json(WATERMARK_POSITION_FILE, settings)
 
-# ---------------------------------------------------------------------------
-# Auth filter
-# ---------------------------------------------------------------------------
+def get_watermark_settings() -> dict:
+    """Return full watermark settings with defaults."""
+    s = _load_json(WATERMARK_POSITION_FILE, {})
+    mode = s.get("mode", "right")
+    if mode not in WATERMARK_PRESET_MODES:
+        mode = "right"
+    try:
+        offset = max(0, int(s.get("offset", 70)))
+    except (TypeError, ValueError):
+        offset = 70
+    return {
+        "mode":       mode,
+        "offset":     offset,
+        "enabled":    bool(s.get("enabled", True)),
+        "last_2min":  bool(s.get("last_2min", False)),
+        "custom_url": str(s.get("custom_url", "")),
+    }
 
-def _auth_filter():
-    if AUTH_USERS:
-        return filters.user(AUTH_USERS) | filters.user(OWNER_IDS or [])
-    return filters.all
-
-
-AUTH = _auth_filter()
-
-
-def is_owner(user_id: int) -> bool:
-    return user_id in OWNER_IDS
+def save_watermark_settings(**kwargs):
+    """Persist one or more watermark settings fields."""
+    settings = get_watermark_settings()
+    for k, v in kwargs.items():
+        if k in settings:
+            settings[k] = v
+    _save_json(WATERMARK_POSITION_FILE, settings)
 
 
-# ---------------------------------------------------------------------------
-# Admin system
-# ---------------------------------------------------------------------------
-
-def load_admins() -> list:
-    return _load_json(ADMIN_FILE, [])
-
-
-def save_admins(data: list) -> None:
-    _save_json(ADMIN_FILE, data)
-
-
-def is_admin(user_id: int) -> bool:
-    return user_id in load_admins()
-
-
-def add_admin(user_id: int) -> bool:
-    """Add user to admin list. Returns False if already admin."""
-    admins = load_admins()
-    if user_id in admins:
-        return False
-    admins.append(user_id)
-    save_admins(admins)
-    return True
+def get_ott_watermark_settings() -> dict:
+    """Return provider watermark settings without touching DishTV settings."""
+    settings = _load_json(OTT_WATERMARK_POSITION_FILE, {})
+    mode = settings.get("mode", "top_center")
+    if mode not in WATERMARK_PRESET_MODES:
+        mode = "top_center"
+    try:
+        offset = max(0, int(settings.get("offset", 70)))
+    except (TypeError, ValueError):
+        offset = 70
+    return {
+        "mode": mode,
+        "offset": offset,
+        "enabled": bool(settings.get("enabled", True)),
+        "last_2min": bool(settings.get("last_2min", True)),
+        "custom_url": str(settings.get("custom_url", "")),
+    }
 
 
-def del_admin(user_id: int) -> bool:
-    """Remove user from admin list. Returns False if not found."""
-    admins = load_admins()
-    if user_id not in admins:
-        return False
-    admins.remove(user_id)
-    save_admins(admins)
-    return True
+def save_ott_watermark_settings(**kwargs):
+    """Persist provider watermark settings in an OTT-only file."""
+    settings = get_ott_watermark_settings()
+    for key, value in kwargs.items():
+        if key in settings:
+            settings[key] = value
+    _save_json(OTT_WATERMARK_POSITION_FILE, settings)
 
 
-# ---------------------------------------------------------------------------
-# Premium system  (bot/data/premium.json)
-# ---------------------------------------------------------------------------
-# Schema:
-#   { "users": { "<user_id>": { "plan", "added_by", "added_at", "expires_at" } } }
-# expires_at = None  →  lifetime / no expiry
-# ---------------------------------------------------------------------------
+# {user_id: selection_id} — tracks who is waiting to paste a new DishTV watermark URL
+PENDING_URL_CHANGES: dict[int, str] = {}
+# Airtel/Sun NXT use a separate pending map so the DishTV callback flow stays
+# unchanged.
+PENDING_OTT_URL_CHANGES: dict[int, str] = {}
 
-_PREMIUM_PLANS = ["Free Trial", "Basic", "Standard", "Pro", "Lifetime"]
-
-
-def load_premium() -> dict:
-    return _load_json(PREMIUM_FILE, {"users": {}})
+def parse_pixel_value(value):
+    """Parse a non-negative pixel value such as 70px or 70."""
+    match = re.fullmatch(r"(\d+)\s*px?", value.strip(), re.IGNORECASE)
+    return int(match.group(1)) if match else None
 
 
-def save_premium(data: dict) -> None:
+def _build_watermark_menu(selection_id: str):
+    """Return (text, InlineKeyboardMarkup) for the DishTV watermark settings screen."""
+    ws = get_watermark_settings()
+    mode       = ws["mode"]
+    enabled    = ws["enabled"]
+    last_2min  = ws["last_2min"]
+    custom_url = ws["custom_url"]
+
+    POS_LABELS = {
+        "top_center":  "Top Center",
+        "center":      "Center",
+        "left_bottom": "Left",
+        "right":       "Right",
+        "left":        "Left Edge",
+    }
+
+    def _pos_btn(key, label):
+        tick = "✅ " if mode == key else ""
+        return InlineKeyboardButton(f"{tick}{label}", callback_data=f"rec_wm:pos:{key}:{selection_id}")
+
+    pos_row = [
+        _pos_btn("top_center",  "Top Center"),
+        _pos_btn("center",      "Center"),
+        _pos_btn("left_bottom", "Left"),
+    ]
+    toggle_row = [
+        InlineKeyboardButton(
+            "✅ Enable" if enabled else "Enable",
+            callback_data=f"rec_wm:enable:{selection_id}",
+        ),
+        InlineKeyboardButton(
+            "❌ Disable" if not enabled else "Disable",
+            callback_data=f"rec_wm:disable:{selection_id}",
+        ),
+    ]
+    timing_row = [
+        InlineKeyboardButton(
+            f"{'✅' if last_2min else '⬜'} Last 2 Min",
+            callback_data=f"rec_wm:last2min:{selection_id}",
+        ),
+        InlineKeyboardButton(
+            "🔗 Change Watermark Link",
+            callback_data=f"rec_wm:changeurl:{selection_id}",
+        ),
+    ]
+    nav_row = [
+        InlineKeyboardButton("⬅️ Back",            callback_data=f"rec_wm:back:{selection_id}"),
+        InlineKeyboardButton("▶️ Next Recording", callback_data=f"rec_wm:start:{selection_id}"),
+    ]
+    keyboard = InlineKeyboardMarkup([pos_row, toggle_row, timing_row, nav_row])
+
+    pos_label   = POS_LABELS.get(mode, mode)
+    url_display = custom_url if custom_url else "(default)"
+    text = (
+        "🎨 *WM2 Settings*\n\n"
+        f"📍 Position : *{pos_label}*\n"
+        f"🔘 Status   : {'✅ Enabled' if enabled else '❌ Disabled'}\n"
+        f"⏱ Timing   : {'Last 2 min only' if last_2min else 'Off'}\n"
+        f"🔗 URL      : `{url_display}`"
+    )
+    return text, keyboard
+
+
+def _build_ott_watermark_menu(selection_id: str):
+    """Build the provider watermark screen for Airtel and Sun NXT only."""
+    ws = get_ott_watermark_settings()
+    mode = ws["mode"]
+    enabled = ws["enabled"]
+    last_2min = ws["last_2min"]
+    custom_url = ws["custom_url"]
+    labels = {
+        "top_center": "Top Center",
+        "center": "Center",
+        "left_bottom": "Left",
+        "right": "Right",
+        "left": "Left Edge",
+    }
+
+    def position_button(key, label):
+        tick = "✅ " if mode == key else ""
+        return InlineKeyboardButton(
+            f"{tick}{label}",
+            callback_data=f"ott_wm:pos:{key}:{selection_id}",
+        )
+
+    keyboard = InlineKeyboardMarkup([
+        [
+            position_button("top_center", "Top Center"),
+            position_button("center", "Center"),
+            position_button("left_bottom", "Left"),
+        ],
+        [
+            InlineKeyboardButton(
+                "✅ Enable" if enabled else "Enable",
+                callback_data=f"ott_wm:enable:{selection_id}",
+            ),
+            InlineKeyboardButton(
+                "🚫 Disable" if enabled else "✅ Disable",
+                callback_data=f"ott_wm:disable:{selection_id}",
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                f"{'✅' if last_2min else '⬜'} Last 2 Min",
+                callback_data=f"ott_wm:last2min:{selection_id}",
+            ),
+            InlineKeyboardButton(
+                "🔗 Change Watermark",
+                callback_data=f"ott_wm:changeurl:{selection_id}",
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                "⬅️ Back", callback_data=f"ott_wm:back:{selection_id}"
+            ),
+            InlineKeyboardButton(
+                "➡️ Next Recording", callback_data=f"ott_wm:start:{selection_id}"
+            ),
+        ],
+    ])
+    return (
+        "🎨 *Watermark Settings*\n\n"
+        f"📍 Position : *{labels.get(mode, mode)}*\n"
+        f"🔘 Status   : {'✅ Enabled' if enabled else '🚫 Disabled'}\n"
+        f"⏱ Timing   : {'Last 2 min only' if last_2min else 'Off'}\n"
+        f"🔗 URL      : `{custom_url or '(Default)'}`",
+        keyboard,
+    )
+
+
+def _ott_probe_text(source: str) -> str:
+    platform = "Sun NXT" if source == "sunnxt" else "Airtel"
+    return (
+        "🔍 *Probing Stream...*\n\n"
+        "• Detecting available audio tracks...\n"
+        "• Detecting available video qualities...\n\n"
+        f"*Platform:* {platform}\n\n"
+        "━━━━━━━━━━━━━━━━━━━━"
+    )
+
+
+def _ott_quality_keyboard(selection_id: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton(
+            "480p", callback_data=f"ott_quality:{selection_id}:480"
+        ),
+        InlineKeyboardButton(
+            "720p", callback_data=f"ott_quality:{selection_id}:720"
+        ),
+        InlineKeyboardButton(
+            "1080p", callback_data=f"ott_quality:{selection_id}:1080"
+        ),
+    ]])
+
+
+def _ott_quality_text(channel: dict, tracks: list, selected: str = "") -> str:
+    platform = "Sun NXT" if channel.get("source") == "sunnxt" else "Airtel"
+    selected_text = f"\n✅ Selected Quality: *{selected}*" if selected else ""
+    return (
+        "🔍 *Probing stream for Quality...*\n\n"
+        "• Detecting available audio tracks...\n"
+        "• Detecting available video qualities...\n\n"
+        f"📡 Platform: *{platform}*\n\n"
+        "🎞️ *Select video quality:*\n"
+        "Choose your output quality:"
+        f"{selected_text}\n\n"
+        f"{_audio_statuses(tracks)}"
+    )
+
+
+def _ott_watermark_cache_file(url: str) -> str:
+    """Return a local cache filename for a provider watermark URL."""
+    digest = hashlib.sha256(url.encode("utf-8", errors="ignore")).hexdigest()[:16]
+    suffix = Path(urlsplit(url).path).suffix.lower()
+    if suffix not in {".png", ".jpg", ".jpeg", ".webp"}:
+        suffix = ".png"
+    return f"/tmp/ott_watermark_{digest}{suffix}"
+
+
+def _get_watermark_input(watermark_url: str | None = None,
+                         cache_file: str | None = None) -> str:
+    """Return a local watermark path so FFmpeg does not fetch it repeatedly."""
+    watermark_url = WATERMARK_URL if watermark_url is None else watermark_url
+    cache_file = WATERMARK_CACHE_FILE if cache_file is None else cache_file
+    if not watermark_url:
+        return ""
+    if not watermark_url.lower().startswith(("http://", "https://")):
+        return watermark_url if os.path.exists(watermark_url) else ""
+    if os.path.exists(cache_file) and os.path.getsize(cache_file) > 1024:
+        return cache_file
+
+    response = requests.get(watermark_url, timeout=15)
+    response.raise_for_status()
+    if not response.content:
+        raise RuntimeError("Watermark download returned an empty file.")
+    cache_dir = os.path.dirname(cache_file)
+    if cache_dir:
+        os.makedirs(cache_dir, exist_ok=True)
+    temp_path = f"{cache_file}.{os.getpid()}.tmp"
+    with open(temp_path, "wb") as watermark_file:
+        watermark_file.write(response.content)
+    os.replace(temp_path, cache_file)
+    return cache_file
+
+
+def telegram_limit_text():
+    """Return the active Telegram Bot API file limit for user-facing messages."""
+    return "2 GB" if TELEGRAM_LOCAL_API_ENABLED else "20 MB"
+
+
+def telegram_upload_limit_text():
+    """Return the active Telegram upload limit for user-facing messages."""
+    return "2 GB" if TELEGRAM_LOCAL_API_ENABLED else "50 MB"
+
+def get_user_data():
+    return _load_json(USER_DATA_FILE, {})
+
+def save_user_data(data):
+    _save_json(USER_DATA_FILE, data)
+
+def get_admins():
+    return _load_json(ADMINS_FILE, {})
+
+def save_admins(data):
+    _save_json(ADMINS_FILE, data)
+
+def get_verify_tokens():
+    return _load_json(VERIFY_TOKENS_FILE, {})
+
+def save_verify_tokens(data):
+    _save_json(VERIFY_TOKENS_FILE, data)
+
+# ── Premium helpers ────────────────────────────
+
+def get_premium_users():
+    return _load_json(PREMIUM_FILE, {})
+
+def save_premium_users(data):
     _save_json(PREMIUM_FILE, data)
 
-
-def is_premium(user_id: int) -> bool:
-    """Return True when user has an active (non-expired) premium entry."""
-    if user_id in OWNER_IDS or is_admin(user_id):
-        return True
-    data = load_premium()
-    entry = data.get("users", {}).get(str(user_id))
+def is_premium(user_id):
+    users = get_premium_users()
+    entry = users.get(str(user_id))
     if not entry:
         return False
-    exp = entry.get("expires_at")
-    if exp is None:
-        return True   # lifetime
-    try:
-        return datetime.now(tz) < datetime.fromisoformat(exp)
-    except Exception:
+    if str(entry.get("plan", "")).strip().lower() == "lifetime":
         return True
-
-
-def add_premium(user_id: int, days: int | None, plan: str, added_by: int) -> dict:
-    """
-    Add / update premium for user_id.
-    days=None  →  lifetime (no expiry).
-    Returns the saved entry dict.
-    """
-    data  = load_premium()
-    now   = datetime.now(tz)
-    entry = {
-        "plan":       plan,
-        "added_by":   added_by,
-        "added_at":   now.isoformat(),
-        "expires_at": (now + timedelta(days=days)).isoformat() if days is not None else None,
-    }
-    data.setdefault("users", {})[str(user_id)] = entry
-    save_premium(data)
-    return entry
-
-
-def remove_premium(user_id: int) -> bool:
-    """Expire a user's premium immediately. Returns False if not found."""
-    data = load_premium()
-    key  = str(user_id)
-    if key not in data.get("users", {}):
+    expires_at = entry.get("expires_at")
+    if not expires_at:
         return False
-    # Set expires_at to now (expired) instead of deleting — keeps history
-    data["users"][key]["expires_at"] = datetime.now(tz).isoformat()
-    data["users"][key]["expired_by"] = "manual"
-    save_premium(data)
+    try:
+        return datetime.now(IST) < datetime.fromisoformat(expires_at)
+    except (TypeError, ValueError):
+        return False
+
+def parse_duration_str(duration_str):
+    """Parse duration like 30m, 1h, 1D, 28D → timedelta."""
+    duration_str = duration_str.strip()
+    match = re.match(r"^(\d+)([mMhHdD])$", duration_str)
+    if not match:
+        return None
+    value = int(match.group(1))
+    unit = match.group(2).lower()
+    if unit == "m":
+        return timedelta(minutes=value)
+    elif unit == "h":
+        return timedelta(hours=value)
+    elif unit == "d":
+        return timedelta(days=value)
+    return None
+
+def is_verified(user_id):
+    tokens = get_verify_tokens()
+    entry = tokens.get(str(user_id))
+    if not entry:
+        return False
+    verified_at = entry.get("verified_at")
+    if not verified_at:
+        return False
+    elapsed = (datetime.now(IST) - datetime.fromisoformat(verified_at)).total_seconds()
+    return elapsed < VERIFICATION_EXPIRY_SECONDS
+
+def generate_verify_token(user_id):
+    token = _secrets.token_hex(16)
+    tokens = get_verify_tokens()
+    tokens[str(user_id)] = {
+        "token": token,
+        "created_at": datetime.now(IST).isoformat(),
+        "verified_at": None,
+    }
+    save_verify_tokens(tokens)
+    return token
+
+def mark_verified(user_id, token):
+    tokens = get_verify_tokens()
+    entry = tokens.get(str(user_id))
+    if not entry or entry.get("token") != token:
+        return False
+    # Token must be used within 15 minutes of generation
+    created_at = datetime.fromisoformat(entry["created_at"])
+    if (datetime.now(IST) - created_at).total_seconds() > 900:
+        return False
+    entry["verified_at"] = datetime.now(IST).isoformat()
+    save_verify_tokens(tokens)
     return True
 
-
-def _premium_status_line(uid_str: str, entry: dict) -> str:
-    """One-line status for premium list output."""
-    exp = entry.get("expires_at")
-    plan = entry.get("plan", "—")
-    if exp is None:
-        exp_str = "♾️ Lifetime"
-    else:
-        try:
-            exp_dt  = datetime.fromisoformat(exp)
-            now     = datetime.now(tz)
-            if now >= exp_dt:
-                exp_str = "❌ Expired"
-            else:
-                remaining = (exp_dt - now).days
-                exp_str   = f"✅ {exp_dt.strftime('%Y-%m-%d')} (+{remaining}d)"
-        except Exception:
-            exp_str = str(exp)
-    return f"• `{uid_str}` — **{plan}** | {exp_str}"
-
-
-# ---------------------------------------------------------------------------
-# Group membership gate
-# ---------------------------------------------------------------------------
-
-# In-memory cache: {user_id: (is_member, expires_at)}
-_member_cache: dict = {}
-_MEMBER_CACHE_TTL = 180  # seconds
-
-
-async def is_group_member(client, user_id: int) -> bool:
-    """
-    Return True if user_id is a member of GROUP_CHAT_ID.
-    Owners and admins always return True.
-    Returns True when GROUP_CHAT_ID is not configured (gate disabled).
-    """
-    if not GROUP_CHAT_ID:
-        return True
-    if is_owner(user_id) or is_admin(user_id):
-        return True
-
-    cached = _member_cache.get(user_id)
-    if cached and cached[1] > time.time():
-        return cached[0]
-
+def shorten_url(long_url):
+    if not SHORTLINK_API:
+        return long_url
     try:
-        from pyrogram.enums import ChatMemberStatus
-        member = await client.get_chat_member(GROUP_CHAT_ID, user_id)
-        result = member.status in (
-            ChatMemberStatus.MEMBER,
-            ChatMemberStatus.ADMINISTRATOR,
-            ChatMemberStatus.OWNER,
+        api_base = SHORTLINK_URL.rstrip("/")
+        resp = requests.get(
+            f"{api_base}/api",
+            params={"api": SHORTLINK_API, "url": long_url},
+            timeout=10
         )
-    except Exception:
-        result = True   # fail-open: don't block user if Telegram API has a hiccup
-
-    _member_cache[user_id] = (result, time.time() + _MEMBER_CACHE_TTL)
-    return result
-
-
-def invalidate_member_cache(user_id: int) -> None:
-    """Force re-check on next request (e.g. after admin add/remove)."""
-    _member_cache.pop(user_id, None)
-
-
-# ---------------------------------------------------------------------------
-# Utility functions
-# ---------------------------------------------------------------------------
-
-def time_to_seconds(time_str: str) -> int:
-    try:
-        parts = time_str.split(":")
-        parts = [int(p) for p in parts]
-        if len(parts) == 3:
-            h, m, s = parts
-        elif len(parts) == 2:
-            h, m, s = 0, parts[0], parts[1]
-        else:
-            return 0
-        return h * 3600 + m * 60 + s
-    except Exception:
-        return 0
-
-
-def TimeFormatter(milliseconds: int) -> str:
-    seconds, _ms = divmod(int(milliseconds), 1000)
-    minutes, sec = divmod(seconds, 60)
-    hours, min_  = divmod(minutes, 60)
-    if hours > 0:
-        return f"{hours:02}:{min_:02}:{sec:02}"
-    return f"{min_:02}:{sec:02}"
-
-
-def _parse_duration_token(tok: str) -> int:
-    tok = (tok or "").strip().lower()
-    if not tok:
-        return 0
-    if ":" in tok:
-        parts = tok.split(":")
-        try:
-            parts = [int(p) for p in parts]
-        except ValueError:
-            return 0
-        if len(parts) == 3:
-            h, m, s = parts
-        elif len(parts) == 2:
-            h, m, s = 0, parts[0], parts[1]
-        else:
-            return 0
-        return h * 3600 + m * 60 + s
-    m = re.fullmatch(r"(\d+)([smh]?)", tok)
-    if not m:
-        return 0
-    n = int(m.group(1))
-    unit = m.group(2) or "s"
-    return n * {"s": 1, "m": 60, "h": 3600}[unit]
-
-
-def _seconds_to_hms(sec: int) -> str:
-    sec = max(0, int(sec))
-    h, rem = divmod(sec, 3600)
-    m, s   = divmod(rem, 60)
-    return f"{h:02d}:{m:02d}:{s:02d}"
-
-# ---------------------------------------------------------------------------
-# Stream probe
-# ---------------------------------------------------------------------------
-
-DEFAULT_USER_AGENT = (
-    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
-)
-
-_M3U8_RE = re.compile(
-    r"""(?xi)
-    (?P<url>
-        (?:https?:)?//[^\s'"<>()\\]+?\.m3u8(?:\?[^\s'"<>()\\]*)?
-        |
-        /[^\s'"<>()\\]+?\.m3u8(?:\?[^\s'"<>()\\]*)?
-    )
-    """
-)
-
-
-async def probe_stream(url: str, timeout: float = 8.0, _depth: int = 0) -> dict:
-    from urllib.parse import urljoin, urlparse
-    from urllib.request import Request, urlopen
-
-    def _fetch(target_url: str, page_referer: str = "") -> dict:
-        parsed = urlparse(target_url)
-        host_referer = f"{parsed.scheme}://{parsed.netloc}/" if parsed.scheme else ""
-        req = Request(
-            target_url,
-            headers={"User-Agent": DEFAULT_USER_AGENT, "Referer": page_referer or host_referer, "Accept": "*/*"},
-            method="GET",
+        data = resp.json()
+        # shortxlinks.in / ShrinkMe: try all common response fields
+        short = (
+            data.get("shortenedUrl")
+            or data.get("link")
+            or (data.get("shortenedUrl") if data.get("status") == "success" else None)
+            or data.get("short_url")
+            or data.get("url")
         )
-        with urlopen(req, timeout=timeout) as resp:
-            final_url = resp.geturl() or target_url
-            ctype = (resp.headers.get("Content-Type") or "").lower()
-            body  = resp.read(512 * 1024)
-            return {"final_url": final_url, "ctype": ctype, "body": body}
-
-    def _probe(target_url: str) -> dict:
-        parsed = urlparse(target_url)
-        host_referer = f"{parsed.scheme}://{parsed.netloc}/" if parsed.scheme else ""
-        result = {"is_hls": False, "final_url": target_url, "referer": host_referer,
-                  "user_agent": DEFAULT_USER_AGENT, "extracted_from": None}
-        try:
-            fetched   = _fetch(target_url)
-            final_url = fetched["final_url"]
-            ctype     = fetched["ctype"]
-            body      = fetched["body"]
-            result["final_url"] = final_url
-            final_parsed = urlparse(final_url)
-            if final_parsed.scheme and final_parsed.netloc:
-                result["referer"] = f"{final_parsed.scheme}://{final_parsed.netloc}/"
-            head_text = body[:2048].decode("utf-8", errors="ignore").lstrip()
-            if "mpegurl" in ctype or "m3u8" in ctype or head_text.startswith("#EXTM3U"):
-                result["is_hls"] = True
-                return result
-            looks_textual = ("html" in ctype or "javascript" in ctype or "json" in ctype
-                             or "text" in ctype or not ctype)
-            if not looks_textual:
-                return result
-            text  = body.decode("utf-8", errors="ignore")
-            match = _M3U8_RE.search(text)
-            if not match:
-                return result
-            raw = match.group("url")
-            if raw.startswith("//"):
-                scheme    = final_parsed.scheme or "https"
-                extracted = f"{scheme}:{raw}"
-            elif raw.startswith("/"):
-                extracted = urljoin(final_url, raw)
-            else:
-                extracted = raw
-            LOG.info(f"Extracted m3u8 from page {final_url}: {extracted[:100]}")
-            result["extracted_from"]  = final_url
-            result["_extracted_url"]  = extracted
-            return result
-        except Exception as e:
-            LOG.warning(f"Stream probe failed for {target_url}: {e}")
-            return result
-
-    first     = await asyncio.to_thread(_probe, url)
-    extracted = first.pop("_extracted_url", None)
-    if extracted and _depth == 0:
-        page_url = first["final_url"]
-        nested   = await probe_stream(extracted, timeout=timeout, _depth=1)
-        if nested["is_hls"]:
-            nested["extracted_from"] = page_url
-            nested["referer"]        = page_url
-            return nested
-    return first
-
-
-# ---------------------------------------------------------------------------
-# Shell / FFprobe helpers
-# ---------------------------------------------------------------------------
-
-async def runcmd(cmd: str) -> Tuple[int, str, str]:
-    args    = shlex.split(cmd)
-    process = await asyncio.create_subprocess_exec(
-        *args, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-    )
-    stdout, stderr = await process.communicate()
-    return process.returncode, stdout.decode(errors="ignore"), stderr.decode(errors="ignore")
-
-
-async def get_video_duration(input_file: str) -> int:
-    try:
-        parser   = createParser(input_file)
-        if not parser:
-            return 0
-        metadata = extractMetadata(parser)
-        if not metadata or not metadata.has("duration"):
-            return 0
-        return int(metadata.get("duration").seconds)
-    except Exception as e:
-        LOG.warning(f"Hachoir failed: {e}")
-        return 0
-
-
-async def take_stream_snapshot(url: str, out_path: str, is_hls: bool = True) -> bool:
-    """Capture a single frame from a live/HLS stream for a live preview thumbnail."""
-    try:
-        hls_part = "-f hls -allowed_extensions ALL " if is_hls else ""
-        rc, _, _ = await asyncio.wait_for(
-            runcmd(
-                f'ffmpeg -y -user_agent "{DEFAULT_USER_AGENT}" '
-                f'{hls_part}'
-                f'-probesize 5000000 -analyzeduration 5000000 '
-                f'-i {shlex.quote(url)} '
-                f'-vframes 1 -q:v 2 {shlex.quote(out_path)}'
-            ),
-            timeout=25,
-        )
-        return rc == 0 and os.path.exists(out_path)
+        return short if short else long_url
     except Exception:
+        return long_url
+
+def is_owner(user_id):
+    if not BOT_OWNER_ID:
         return False
+    return str(user_id) == str(BOT_OWNER_ID)
 
 
-def _rec_progress_kb(user_id: int, rec_id: int) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🎬 Gen Preview",      callback_data=f"rec_prev:{user_id}:{rec_id}")],
-        [InlineKeyboardButton("🔄 Refresh Progress", callback_data=f"rec_ref:{user_id}:{rec_id}"),
-         InlineKeyboardButton("❌ Cancel",           callback_data=f"rec_cxl:{user_id}:{rec_id}")],
-    ])
+def _is_bot_mode_command(update):
+    message = update.effective_message
+    text = (getattr(message, "text", None) or getattr(message, "caption", None) or "").strip()
+    if not text.startswith("/"):
+        return False
+    command = text.split(maxsplit=1)[0].split("@", 1)[0].lower()
+    return command in {"/public", "/private"}
 
 
-async def get_duration_ffmpeg(input_file: str) -> int:
+def _is_verification_update(update):
+    """Allow verification requests and their completion flow in private mode."""
+    message = update.effective_message
+    text = (
+        getattr(message, "text", None)
+        or getattr(message, "caption", None)
+        or ""
+    ).strip()
+    if text.startswith("/"):
+        parts = text.split(maxsplit=1)
+        command = parts[0].split("@", 1)[0].lower()
+        if command == "/verify":
+            return True
+        if command == "/start" and len(parts) > 1:
+            return parts[1].strip().startswith("verify_")
+
+    query = update.callback_query
+    return bool(query and query.data == "howto_verify")
+
+
+async def bot_mode_access_guard(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Block non-owner users before any handler runs while private mode is enabled."""
+    if (
+        BOT_MODE != "private"
+        or _is_bot_mode_command(update)
+        or _is_verification_update(update)
+    ):
+        return
+    user = update.effective_user
+    if user and is_owner(user.id):
+        return
+
+    denial = (
+        "🚫 Access Denied!\n\n"
+        "🔒 The bot is currently running in Private Mode.\n\n"
+        "Only the Bot Owner can use this bot."
+    )
+    query = update.callback_query
+    if query:
+        await query.answer("Access Denied!", show_alert=True)
+        if query.message:
+            await query.message.reply_text(denial)
+    elif update.effective_message:
+        await update.effective_message.reply_text(denial)
+    raise ApplicationHandlerStop
+
+
+def is_admin(user_id):
+    admins = get_admins()
+    return str(user_id) in admins
+
+def get_user_role(user_id):
+    if is_owner(user_id):
+        return "owner"
+    if is_admin(user_id):
+        return "admin"
+    return "user"
+
+
+async def leave_unauthorized_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Enforce group access and leave unauthorized groups automatically."""
+    chat = update.effective_chat
+    if not chat:
+        return
+
+    if chat.type == "private":
+        if _is_verification_update(update):
+            return
+        if BOT_MODE == "public":
+            return
+        user = update.effective_user
+        if (
+            not user
+            or is_owner(user.id)
+            or is_admin(user.id)
+            or is_premium(user.id)
+        ):
+            return
+
+        display_name = f"@{user.username}" if user.username else (user.first_name or "User")
+        join_markup = InlineKeyboardMarkup([[
+            InlineKeyboardButton("🔗 Join Group", url=GROUP_LINK)
+        ]])
+        await context.bot.send_message(
+            chat_id=chat.id,
+            text=(
+                f"👋 Hi {display_name}\n"
+                f"User ID: `{user.id}`\n\n"
+                "This bot works only in our official group.\n"
+                "Owner, Admin, and Premium users can use the bot in private chat.\n"
+                "Normal users must use the official group.\n\n"
+                "👉 Please join the group below to use this bot."
+            ),
+            reply_markup=join_markup,
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        raise ApplicationHandlerStop
+
+    if chat.type not in ("group", "supergroup"):
+        return
+    if chat.id in AUTHORIZED_GROUP_IDS and chat.id not in UNAUTHORIZED_GROUP_IDS:
+        return
+
+    if chat.id not in _GROUP_LEAVE_IN_PROGRESS:
+        _GROUP_LEAVE_IN_PROGRESS.add(chat.id)
+        try:
+            logger.warning(
+                "Unauthorized group %s detected; leaving automatically.",
+                chat.id,
+            )
+            await context.bot.leave_chat(chat_id=chat.id)
+            logger.info("Left unauthorized group %s.", chat.id)
+        except Exception:
+            logger.exception("Could not leave unauthorized group %s.", chat.id)
+        finally:
+            _GROUP_LEAVE_IN_PROGRESS.discard(chat.id)
+
+    # Do not allow any command/message handler to process this group update.
+    raise ApplicationHandlerStop
+
+# ── Credential helpers ─────────────────────────
+
+def load_credentials():
+    creds_path = os.path.join(DATA_FOLDER, "creds.jtv")
+    key_path = os.path.join(DATA_FOLDER, "credskey.jtv")
+    if not os.path.exists(creds_path) or not os.path.exists(key_path):
+        return None
+    with open(key_path, "r") as f:
+        key = int(f.read().strip())
+    with open(creds_path, "r") as f:
+        enc = f.read().strip()
+    decoded = base64.b64decode(enc).decode("latin-1")
+    decrypted = "".join(chr(ord(c) - key) for c in decoded)
+    return json.loads(decrypted)
+
+def save_credentials(jio_data, mobile):
+    u_name = encrypt_data(mobile, "TS-JIOTV")
+    os.makedirs(DATA_FOLDER, exist_ok=True)
+    with open(os.path.join(DATA_FOLDER, "creds.jtv"), "w") as f:
+        f.write(encrypt_data(json.dumps(jio_data), u_name))
+    with open(os.path.join(DATA_FOLDER, "credskey.jtv"), "w") as f:
+        f.write(u_name)
+    invalidate_stream_caches()
+
+
+def invalidate_stream_caches():
+    """Drop playlist and authenticated playback data after login/session changes."""
+    global _channel_cache, _channel_cache_ts
+    _channel_cache = None
+    _channel_cache_ts = 0
+    _authenticated_stream_cache.clear()
+
+def encrypt_data(data, key):
+    key = int(key)
+    enc = "".join(chr(ord(c) + key) for c in data)
+    return base64.b64encode(enc.encode("latin-1")).decode()
+
+# ── JioTV API helpers ──────────────────────────
+
+def parse_m3u(text, source="dishtv"):
+    """Parse an M3U playlist into a list of channel dicts compatible with the rest of the bot."""
+    channels = []
+    lines = text.splitlines()
+    i = 0
+    pending_license_key = ""
+    while i < len(lines):
+        line = lines[i].strip()
+        if line.startswith("#KODIPROP:inputstream.adaptive.license_key="):
+            pending_license_key = line.split("=", 1)[1]
+            i += 1
+            continue
+        if line.startswith("#EXTINF"):
+            # Extract tvg attributes from the EXTINF line
+            channel_id = re.search(r'tvg-id="([^"]*)"', line)
+            channel_name = re.search(r'tvg-name="([^"]*)"', line)
+            logo = re.search(r'tvg-logo="([^"]*)"', line)
+            group = re.search(r'group-title="([^"]*)"', line)
+
+            channel_id = channel_id.group(1) if channel_id else ""
+            channel_name = channel_name.group(1) if channel_name else ""
+            if not channel_name:
+                # Some provider playlists use the text after the final comma
+                # instead of a tvg-name attribute.
+                display_name = line.split(",", 1)[1].strip() if "," in line else ""
+                channel_name = display_name
+            logo = logo.group(1) if logo else ""
+            group = group.group(1) if group else "Other"
+
+            # Collect KODIPROP / EXTVLCOPT / EXTHTTP lines and stream URL
+            license_key = pending_license_key
+            pending_license_key = ""
+            user_agent = ""
+            cookie = ""
+            stream_url = ""
+            i += 1
+            while i < len(lines):
+                nxt = lines[i].strip()
+                if nxt.startswith("#KODIPROP:inputstream.adaptive.license_key="):
+                    license_key = nxt.split("=", 1)[1]
+                elif nxt.startswith("#EXTVLCOPT:http-user-agent="):
+                    user_agent = nxt.split("=", 1)[1]
+                elif nxt.startswith("#EXTHTTP:"):
+                    try:
+                        http_data = json.loads(nxt[len("#EXTHTTP:"):])
+                        cookie = http_data.get("cookie", "")
+                    except Exception:
+                        pass
+                elif nxt and not nxt.startswith("#"):
+                    stream_url = nxt
+                    i += 1
+                    break
+                i += 1
+
+            if channel_name and stream_url:
+                channels.append({
+                    "channel_id": channel_id,
+                    "channel_name": channel_name,
+                    "channelCategoryId": group,
+                    "isCatchupAvailable": "False",
+                    "logoUrl": logo,
+                    "stream_url": stream_url,
+                    "license_key": license_key,
+                    "cenc_key": _license_to_cenc_key(license_key),
+                    "user_agent": user_agent,
+                    "cookie": cookie,
+                    "source": source,
+                })
+        else:
+            i += 1
+    return channels
+
+
+def _license_to_cenc_key(license_value: str) -> str:
+    """Extract the hex ClearKey from a Kodi KODIPROP JSON value."""
+    if not license_value:
+        return ""
     try:
-        cmd = (f'ffprobe -v error -show_entries format=duration '
-               f'-of default=noprint_wrappers=1:nokey=1 "{input_file}"')
-        retcode, out, _err = await runcmd(cmd)
-        if retcode == 0 and out.strip():
-            return int(float(out.strip()))
-    except Exception as e:
-        LOG.warning(f"FFprobe failed: {e}")
+        value = json.loads(license_value)
+        keys = value.get("keys") or []
+        key_value = str(keys[0].get("k") or "").strip()
+        if not key_value:
+            return ""
+        padding = "=" * (-len(key_value) % 4)
+        return base64.urlsafe_b64decode(key_value + padding).hex()
+    except (TypeError, ValueError, KeyError, IndexError):
+        return ""
+
+
+def parse_airtel_playlist(text):
+    """Parse the uploaded Airtel category/name/URL text file."""
+    channels = []
+    pending_category = ""
+    pending_name = ""
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        if line.startswith("[") and line.endswith("]"):
+            pending_category = line[1:-1].strip()
+            continue
+        if line.startswith(("http://", "https://")):
+            if pending_name:
+                channels.append({
+                    "channel_id": "",
+                    "channel_name": pending_name,
+                    "channelCategoryId": pending_category or "Airtel",
+                    "isCatchupAvailable": "False",
+                    "stream_url": line,
+                    "license_key": "",
+                    "user_agent": "",
+                    "cookie": "",
+                    "source": "airtel",
+                    "airtel_overlay": True,
+                })
+            pending_name = ""
+            continue
+        pending_name = line
+    return channels
+
+
+def get_channels(force_refresh=False):
+    global _channel_cache, _channel_cache_ts
+    now = time.time()
+    if not force_refresh and _channel_cache and (now - _channel_cache_ts) < _CHANNEL_CACHE_TTL:
+        return _channel_cache
+    resp = requests.get(PLAYLIST_URL, timeout=15)
+    resp.raise_for_status()
+    _channel_cache = parse_m3u(resp.text, source="dishtv")
+    _channel_cache_ts = now
+    return _channel_cache
+
+
+def get_airtel_channels(force_refresh=False):
+    global _airtel_channel_cache, _airtel_channel_cache_ts
+    now = time.time()
+    if (
+        not force_refresh
+        and _airtel_channel_cache
+        and (now - _airtel_channel_cache_ts) < _CHANNEL_CACHE_TTL
+    ):
+        return _airtel_channel_cache
+    playlist_text = ""
+    if AIRTEL_PLAYLIST_URL:
+        try:
+            response = requests.get(AIRTEL_PLAYLIST_URL, timeout=15)
+            response.raise_for_status()
+            playlist_text = response.text
+        except requests.RequestException as exc:
+            logger.warning("Airtel remote playlist unavailable: %s", exc)
+    if not playlist_text:
+        if not AIRTEL_PLAYLIST_FILE:
+            return []
+        path = Path(AIRTEL_PLAYLIST_FILE)
+        if path.exists():
+            playlist_text = path.read_text(
+                encoding="utf-8", errors="replace"
+            )
+        else:
+            return []
+    _airtel_channel_cache = parse_airtel_playlist(playlist_text)
+    _airtel_channel_cache_ts = now
+    return _airtel_channel_cache
+
+
+def get_sunnxt_channels(force_refresh=False):
+    global _sunnxt_channel_cache, _sunnxt_channel_cache_ts
+    now = time.time()
+    if (
+        not force_refresh
+        and _sunnxt_channel_cache
+        and (now - _sunnxt_channel_cache_ts) < _CHANNEL_CACHE_TTL
+    ):
+        return _sunnxt_channel_cache
+    if not SUNNXT_PLAYLIST_URL:
+        return []
+    response = requests.get(SUNNXT_PLAYLIST_URL, timeout=20)
+    response.raise_for_status()
+    _sunnxt_channel_cache = [
+        channel for channel in parse_m3u(response.text, source="sunnxt")
+        if channel.get("stream_url", "").startswith(("http://", "https://"))
+    ]
+    _sunnxt_channel_cache_ts = now
+    return _sunnxt_channel_cache
+
+
+def find_channel(name_query, force_refresh=False, source="dishtv"):
+    if source == "airtel":
+        channels = get_airtel_channels(force_refresh=force_refresh)
+    elif source == "sunnxt":
+        channels = get_sunnxt_channels(force_refresh=force_refresh)
+    else:
+        channels = get_channels(force_refresh=force_refresh)
+    q = name_query.lower().strip()
+    for c in channels:
+        if c["channel_name"].lower() == q:
+            return c
+    for c in channels:
+        if q in c["channel_name"].lower():
+            return c
+    return None
+
+def refresh_channel(channel):
+    """Refresh signed playlist data immediately before a recording."""
+    if channel.get("source") in {"airtel", "sunnxt"}:
+        # Remote provider playlists may be updated while the bot is running.
+        fresh = find_channel(
+            channel.get("channel_name", ""),
+            force_refresh=True,
+            source=channel.get("source"),
+        )
+        return fresh or channel
+    try:
+        fresh = find_channel(channel.get("channel_name", ""), force_refresh=True)
+        fresh = fresh or channel
+        authenticated = get_authenticated_live_stream(fresh)
+        if authenticated and authenticated.get("stream_url"):
+            fresh = dict(fresh)
+            for key, value in authenticated.items():
+                if value:
+                    fresh[key] = value
+        return fresh
+    except Exception:
+        return channel
+
+
+def _airtel_stream_error(stream_url: str) -> str:
+    """Return an upstream Airtel error, or empty for a valid HLS playlist."""
+    if not stream_url or not stream_url.lower().startswith(("http://", "https://")):
+        return "Airtel stream URL missing."
+    try:
+        response = requests.get(
+            stream_url,
+            headers={"User-Agent": "Mozilla/5.0", "Accept": "*/*"},
+            timeout=15,
+            allow_redirects=True,
+        )
+        body = response.text.lstrip()
+        if response.status_code >= 400:
+            return f"Upstream HTTP {response.status_code}."
+        if body.lower().startswith("error:"):
+            return body[:240].strip()
+        if "#EXTM3U" not in body:
+            return "Upstream did not return a valid HLS playlist."
+        return ""
+    except requests.RequestException as exc:
+        return f"Upstream request failed: {exc}"
+
+
+def _dish_stream_error(channel: dict) -> str:
+    """Return a DishTV CDN error, or empty when its DASH MPD is reachable."""
+    stream_url = channel.get("stream_url", "")
+    if not stream_url or not stream_url.lower().startswith(("http://", "https://")):
+        return "DishTV MPD URL missing."
+    headers = {}
+    if channel.get("user_agent"):
+        headers["User-Agent"] = channel["user_agent"]
+    if channel.get("cookie"):
+        headers["Cookie"] = channel["cookie"]
+    try:
+        response = requests.get(
+            stream_url,
+            headers=headers,
+            timeout=15,
+            allow_redirects=True,
+        )
+        if response.status_code >= 400:
+            return f"DishTV CDN HTTP {response.status_code}."
+        body = response.text.lstrip()
+        if "<MPD" not in body[:2000] and "<?xml" not in body[:2000]:
+            return "DishTV upstream did not return a valid DASH MPD."
+        return ""
+    except requests.RequestException as exc:
+        return f"DishTV upstream request failed: {exc}"
+
+
+def _sunnxt_stream_error(channel: dict) -> str:
+    """Return a Sunnxt DASH error, or empty when its MPD is reachable."""
+    stream_url = channel.get("stream_url", "")
+    if not stream_url or not stream_url.lower().startswith(("http://", "https://")):
+        return "Sunnxt MPD URL missing."
+    try:
+        response = requests.get(stream_url, timeout=15, allow_redirects=True)
+        if response.status_code >= 400:
+            return f"Sunnxt upstream HTTP {response.status_code}."
+        body = response.text.lstrip()
+        if "<MPD" not in body[:2000] and "<?xml" not in body[:2000]:
+            return "Sunnxt upstream did not return a valid DASH MPD."
+        return ""
+    except requests.RequestException as exc:
+        return f"Sunnxt upstream request failed: {exc}"
+
+
+def _parse_dash_duration(value: str) -> int | None:
+    """Parse the simple PT... ISO-8601 durations used by DASH MPDs."""
+    match = re.fullmatch(
+        r"PT(?:(?P<hours>\d+(?:\.\d+)?)H)?"
+        r"(?:(?P<minutes>\d+(?:\.\d+)?)M)?"
+        r"(?:(?P<seconds>\d+(?:\.\d+)?)S)?",
+        str(value or ""),
+        re.IGNORECASE,
+    )
+    if not match:
+        return None
+    return round(
+        float(match.group("hours") or 0) * 3600
+        + float(match.group("minutes") or 0) * 60
+        + float(match.group("seconds") or 0)
+    )
+
+
+def _inspect_dash_manifest(manifest: str) -> dict:
+    """Summarize the DVR window and segment timelines in a DASH MPD."""
+    namespace = {"dash": "urn:mpeg:dash:schema:mpd:2011"}
+    root = ET.fromstring(manifest)
+    timelines = root.findall(".//dash:SegmentTimeline", namespace)
+    segment_counts = []
+    open_repeat = False
+    for timeline in timelines:
+        count = 0
+        for segment in timeline.findall("dash:S", namespace):
+            repeat = int(segment.attrib.get("r", "0"))
+            if repeat < 0:
+                open_repeat = True
+                count += 1
+            else:
+                count += repeat + 1
+        segment_counts.append(count)
+    return {
+        "type": root.attrib.get("type", "unknown"),
+        "minimum_update": root.attrib.get("minimumUpdatePeriod", ""),
+        "timeshift_seconds": _parse_dash_duration(
+            root.attrib.get("timeShiftBufferDepth", "")
+        ),
+        "timeline_count": len(timelines),
+        "segment_count": max(segment_counts or [0]),
+        "open_repeat": open_repeat,
+        "has_segment_template": bool(
+            root.findall(".//dash:SegmentTemplate", namespace)
+        ),
+        "has_segment_list": bool(root.findall(".//dash:SegmentList", namespace)),
+    }
+
+
+def _fetch_dash_manifest(channel: dict) -> str:
+    headers = {}
+    if channel.get("cookie"):
+        headers["Cookie"] = channel["cookie"]
+    if channel.get("user_agent"):
+        headers["User-Agent"] = channel["user_agent"]
+    response = requests.get(channel["stream_url"], headers=headers, timeout=15)
+    response.raise_for_status()
+    return response.text
+
+
+def _expand_dash_timeline(timeline):
+    """Expand DASH S/r entries into (timestamp, duration) pairs."""
+    segments = []
+    current_time = None
+    entries = list(timeline.findall("{urn:mpeg:dash:schema:mpd:2011}S"))
+    for index, entry in enumerate(entries):
+        if entry.get("t") is not None:
+            current_time = int(entry.get("t"))
+        if current_time is None:
+            current_time = 0
+        duration = int(entry.get("d"))
+        repeat = int(entry.get("r", "0"))
+        if repeat < 0:
+            next_time = None
+            for future in entries[index + 1:]:
+                if future.get("t") is not None:
+                    next_time = int(future.get("t"))
+                    break
+            repeat = (
+                max(0, (next_time - current_time) // duration - 1)
+                if next_time is not None else 0
+            )
+        for _ in range(repeat + 1):
+            segments.append((current_time, duration))
+            current_time += duration
+    return segments
+
+
+def _format_dash_duration(seconds: float) -> str:
+    seconds = max(0, seconds)
+    whole = int(seconds)
+    millis = int(round((seconds - whole) * 1000))
+    if millis >= 1000:
+        whole += 1
+        millis = 0
+    if millis:
+        return f"PT{whole}.{millis:03d}S"
+    return f"PT{whole}S"
+
+
+def _create_static_dash_mpd(
+    channel: dict,
+    start_h: int,
+    start_m: int,
+    end_h: int,
+    end_m: int,
+    output_path: str,
+) -> tuple[str, int, str]:
+    """Create a static MPD containing a requested portion of the DVR window."""
+    manifest = _fetch_dash_manifest(channel)
+    namespace_uri = "urn:mpeg:dash:schema:mpd:2011"
+    namespace = {"dash": namespace_uri}
+    root = ET.fromstring(manifest)
+    now_local = datetime.now(IST)
+    start_local = now_local.replace(
+        hour=start_h, minute=start_m, second=0, microsecond=0
+    )
+    end_local = now_local.replace(
+        hour=end_h, minute=end_m, second=0, microsecond=0
+    )
+    if end_local <= start_local:
+        end_local += timedelta(days=1)
+    requested_start = start_local.timestamp()
+    requested_end = end_local.timestamp()
+
+    timeline_templates = []
+    for adaptation in root.findall(".//dash:AdaptationSet", namespace):
+        template = adaptation.find("dash:SegmentTemplate", namespace)
+        if template is None:
+            continue
+        for timeline in template.findall("dash:SegmentTimeline", namespace):
+            timeline_templates.append((template, timeline))
+    timelines = [timeline for _, timeline in timeline_templates]
+    if not timelines:
+        raise ValueError("This MPD does not contain a SegmentTimeline.")
+
+    available_ranges = []
+    selected_duration = 0.0
+    for segment_template, timeline in timeline_templates:
+        timescale = int(segment_template.get("timescale", "1"))
+        segments = _expand_dash_timeline(timeline)
+        if not segments:
+            continue
+        available_ranges.append((
+            segments[0][0] / timescale,
+            (segments[-1][0] + segments[-1][1]) / timescale,
+        ))
+        selected = [
+            item for item in segments
+            if item[0] / timescale < requested_end
+            and (item[0] + item[1]) / timescale > requested_start
+        ]
+        if not selected:
+            continue
+        selected_duration = max(
+            selected_duration,
+            (selected[-1][0] + selected[-1][1] - selected[0][0]) / timescale,
+        )
+        timeline.clear()
+        for index, (timestamp, duration) in enumerate(selected):
+            attrs = {"d": str(duration)}
+            if index == 0:
+                attrs["t"] = str(timestamp)
+            ET.SubElement(timeline, f"{{{namespace_uri}}}S", attrs)
+        segment_template.set("presentationTimeOffset", str(selected[0][0]))
+
+    if not available_ranges:
+        raise ValueError("The MPD timeline is empty.")
+    available_start = min(item[0] for item in available_ranges)
+    available_end = max(item[1] for item in available_ranges)
+    # If only the END is beyond the DVR edge → raise so caller can wait.
+    # If the START is before the window → silently clamp; record what's available.
+    if requested_end > available_end + 3:
+        available_start_local = datetime.fromtimestamp(available_start, tz=IST)
+        available_end_local = datetime.fromtimestamp(available_end, tz=IST)
+        raise ValueError(
+            "The requested time is outside the DVR window. Available range: "
+            f"{available_start_local:%I:%M %p} - {available_end_local:%I:%M %p}."
+        )
+    if selected_duration <= 0:
+        raise ValueError("No segments were found for the requested time.")
+
+    root.set("type", "static")
+    for attribute in (
+        "availabilityStartTime", "publishTime", "minimumUpdatePeriod",
+        "timeShiftBufferDepth",
+    ):
+        root.attrib.pop(attribute, None)
+    root.set("mediaPresentationDuration", _format_dash_duration(selected_duration))
+    base_url = urljoin(channel["stream_url"], "dash/")
+    for base in root.findall(".//dash:BaseURL", namespace):
+        base.text = base_url
+    ET.register_namespace("", namespace_uri)
+    tree = ET.ElementTree(root)
+    tree.write(output_path, encoding="utf-8", xml_declaration=True)
+    return output_path, max(1, round(selected_duration)), _format_dash_duration(selected_duration)
+
+
+def _dvr_manifest_wait_seconds(error, past_range):
+    """Wait briefly when only the requested end is ahead of the live DVR edge."""
+    match = re.search(
+        r"Available range:\s*(\d{1,2}:\d{2}\s*[AP]M)\s*-\s*"
+        r"(\d{1,2}:\d{2}\s*[AP]M)",
+        str(error),
+        re.IGNORECASE,
+    )
+    if not match:
+        return 0
+    available_start = parse_time(match.group(1))
+    available_end = parse_time(match.group(2))
+    if available_start[0] is None or available_end[0] is None:
+        return 0
+
+    def minutes(hour, minute):
+        return hour * 60 + minute
+
+    requested_start = minutes(past_range[0], past_range[1])
+    requested_end = minutes(past_range[2], past_range[3])
+    if requested_end <= requested_start:
+        requested_end += 24 * 60
+    available_start_minutes = minutes(*available_start)
+    available_end_minutes = minutes(*available_end)
+    if available_end_minutes <= available_start_minutes:
+        available_end_minutes += 24 * 60
+    if requested_start < available_start_minutes:
+        return 0
+
+    end_gap = requested_end - available_end_minutes
+    if 0 < end_gap <= 3:
+        return min(180, end_gap * 60 + 8)
     return 0
 
 
-async def _ffprobe_video(path: str) -> dict:
-    probe_cmd = (f'ffprobe -v error -hide_banner -print_format json '
-                 f'-show_format -show_streams {shlex.quote(path)}')
-    rc, out, err = await runcmd(probe_cmd)
-    if rc != 0:
-        raise Exception(f"ffprobe failed: {err.strip() or 'no stderr'}")
-    data         = json.loads(out or "{}")
-    duration     = float(data.get("format", {}).get("duration") or 0)
-    video_height = 0
-    audio_streams: list = []
-    for s in data.get("streams", []):
-        if s.get("codec_type") == "video" and not video_height:
-            video_height = int(s.get("height") or 0)
-        elif s.get("codec_type") == "audio":
-            tags = s.get("tags") or {}
-            lang = (tags.get("language") or "und").lower()[:3]
-            audio_streams.append({
-                "index":    s["index"],
-                "lang":     lang,
-                "codec":    s.get("codec_name", "?"),
-                "channels": s.get("channels", 2),
-            })
-    return {"duration": duration, "video_height": video_height, "audio_streams": audio_streams}
+class _DashProxyHandler(BaseHTTPRequestHandler):
+    """Serve a trimmed local MPD and authenticated DASH children."""
 
-# ---------------------------------------------------------------------------
-# Plan / Channel helpers
-# ---------------------------------------------------------------------------
-
-def render_plans_text() -> str:
-    plans = load_plans()
-    out   = ["**Subscription Plans**\n"]
-    for p in plans:
-        feats = "\n".join([f"  • {f}" for f in p.get("features", [])])
-        out.append(f"**{p['name']}** — `{p['price']}`\nDuration: `{p.get('duration', '-')}`\n{feats}")
-    out.append(f"\nTo subscribe, contact @{SUPPORT_USERNAME}.")
-    return "\n\n".join(out)
-
-
-def _channel_root_kb() -> InlineKeyboardMarkup:
-    """Flat list of hidden-URL channel buttons — names only, never the URL."""
-    rows, row = [], []
-    for name in BOT_CHANNELS:
-        row.append(InlineKeyboardButton(f"📺 {name}", callback_data=f"ch:{name}"))
-        if len(row) == 2:
-            rows.append(row)
-            row = []
-    if row:
-        rows.append(row)
-    if not rows:
-        rows = [[InlineKeyboardButton("No channels configured", callback_data="noop")]]
-    return InlineKeyboardMarkup(rows)
-
-# ---------------------------------------------------------------------------
-# Pre-recording Setup Wizard helpers
-# ---------------------------------------------------------------------------
-
-_QUALITY_BITRATE_KBPS = {"480": 600, "576": 820, "640": 1000, "720": 1500, "1080": 2500}
-
-
-def _est_size_mb(duration_sec: int, quality: str) -> str:
-    br = _QUALITY_BITRATE_KBPS.get(quality, 0)
-    if not br or duration_sec <= 0:
-        return "?"
-    return f"~{duration_sec * br / 8 / 1024:.0f} MB"
-
-
-def _setup_summary(s: dict) -> str:
-    q      = s["quality"]
-    q_str  = f"{q}p" if q != "original" else "Original"
-    q_icon = "🔵" if q == "1080" else ("🔒" if q == "original" else "📺")
-    asp    = s["aspect"]
-    asp_label = {
-        "none": "None (Keep as-is)", "21:9": "21:9 Aspect", "16:9": "16:9 Aspect",
-        "4:5": "4:5 Aspect", "bars": "16:9 Black Bars", "zoom": "16:9 Zoom",
-        "1280x720": "scale=1280:720",
-    }.get(asp, asp)
-    wm     = s["watermark_pos"].replace("_", " ").title() if s["watermark_on"] else "OFF"
-    at     = s["audio_track"]
-    tracks = s.get("detected_audio_tracks", [])
-    if not at:
-        audio_s = "All Tracks"
-    elif len(at) == 1:
-        idx = at[0]
-        audio_s = _audio_track_label(tracks[idx - 1]) if tracks and idx <= len(tracks) else f"Track {idx}"
-    else:
-        parts = []
-        for idx in sorted(at):
-            lang = tracks[idx - 1].get("lang", "?").upper() if tracks and idx <= len(tracks) else f"T{idx}"
-            parts.append(lang)
-        audio_s = ", ".join(parts)
-    auto_s = "✅ On" if s["auto_mode"] else "❌ Off"
-    return (
-        f"📋 **Recording Setup**\n\n"
-        f"⏱ Duration: `{s['timestamp']}`\n"
-        f"🔄 Auto Mode: {auto_s}\n"
-        f"📁 Filename: `{s['filename']}`\n"
-        f"🎙 Audio: `{audio_s}`\n"
-        f"💧 Watermark: `{wm}`\n"
-        f"{q_icon} Size: `{q_str}`\n"
-        f"📐 Aspect: `🔒 {asp_label}`\n\n"
-        f"👇 Choose an option:"
-    )
-
-
-def _kb_step1(s: dict) -> InlineKeyboardMarkup:
-    uid       = s["user_id"]
-    wm_on     = s["watermark_on"]
-    wm_toggle_label = "❌ Disable Watermark" if wm_on else "✅ Enable Watermark"
-    auto_icon = "✅" if s["auto_mode"] else "⏩"
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("↖️ Top Left",      callback_data=f"rs:{uid}:wm_pos:top_left"),
-         InlineKeyboardButton("⬆️ Top Center",    callback_data=f"rs:{uid}:wm_pos:top_center")],
-        [InlineKeyboardButton("↗️ Top Right",     callback_data=f"rs:{uid}:wm_pos:top_right"),
-         InlineKeyboardButton("🎯 Center",        callback_data=f"rs:{uid}:wm_pos:center")],
-        [InlineKeyboardButton("↙️ Bottom Left",   callback_data=f"rs:{uid}:wm_pos:bottom_left"),
-         InlineKeyboardButton("↘️ Bottom Right",  callback_data=f"rs:{uid}:wm_pos:bottom_right")],
-        [InlineKeyboardButton(wm_toggle_label,                       callback_data=f"rs:{uid}:wm_toggle")],
-        [InlineKeyboardButton("✏️ Change Watermark Text",            callback_data=f"rs:{uid}:wm_text")],
-        [InlineKeyboardButton(f"{auto_icon} Last 2 minute",          callback_data=f"rs:{uid}:auto_toggle")],
-        [InlineKeyboardButton("🔙 Back",                              callback_data=f"rs:{uid}:back_audio"),
-         InlineKeyboardButton("📐 Next: Video Size →",               callback_data=f"rs:{uid}:next_quality")],
-        [InlineKeyboardButton("❌ Cancel",                            callback_data=f"rs:{uid}:cancel")],
-    ])
-
-
-def _kb_step2(s: dict) -> InlineKeyboardMarkup:
-    uid  = s["user_id"]
-    dur  = s["duration_sec"]
-    rows = []
-    for q, label, icon in [
-        ("480", "480p", "🖥️"), ("576", "576p", "🖥️"), ("640", "640p", "🖥️"),
-        ("720", "720p", "🖥️"), ("1080", "1080p", "🔵"), ("original", "Original", "🔒"),
-    ]:
-        sel = "✅ " if s["quality"] == q else ""
-        rows.append([InlineKeyboardButton(f"{sel}{icon} {label} ({_est_size_mb(dur, q)})",
-                                          callback_data=f"rs:{uid}:quality:{q}")])
-    rows.append([InlineKeyboardButton("◀️ Back to Watermark",    callback_data=f"rs:{uid}:back_step1")])
-    rows.append([InlineKeyboardButton("📐 Next: Aspect Ratio →", callback_data=f"rs:{uid}:next_aspect"),
-                 InlineKeyboardButton("❌ Cancel",               callback_data=f"rs:{uid}:cancel")])
-    return InlineKeyboardMarkup(rows)
-
-
-def _kb_step3(s: dict) -> InlineKeyboardMarkup:
-    uid  = s["user_id"]
-    rows = []
-    for asp, label in [
-        ("none",    "🔒 None (Keep as-is)"), ("21:9", "📽 21:9 Aspect"),
-        ("16:9",    "🖥️ 16:9 Aspect"),       ("4:5",  "📱 4:5 Aspect"),
-        ("bars",    "⬛ 16:9 Black Bars"),    ("zoom", "🔍 16:9 Zoom"),
-        ("1280x720","📐 scale=1280:720"),
-    ]:
-        sel = "✅ " if s["aspect"] == asp else ""
-        rows.append([InlineKeyboardButton(f"{sel}{label}", callback_data=f"rs:{uid}:aspect:{asp}")])
-    rows.append([InlineKeyboardButton("◀️ Quality/Size",   callback_data=f"rs:{uid}:back_step2")])
-    rows.append([InlineKeyboardButton("▶️ Start Recording", callback_data=f"rs:{uid}:start"),
-                 InlineKeyboardButton("❌ Cancel",          callback_data=f"rs:{uid}:cancel")])
-    return InlineKeyboardMarkup(rows)
-
-
-def _build_vf_and_codec(setup: dict) -> tuple[list[str], list[str], bool]:
-    """
-    Returns (extra_inputs, post_args, needs_encode).
-    extra_inputs: additional -i args inserted after the main stream input (e.g. ["-i", logo_path]).
-    post_args: everything after all inputs — filters, maps, codec args.
-    """
-    quality      = setup["quality"]
-    aspect       = setup["aspect"]
-    wm_on        = setup["watermark_on"]
-    needs_encode = quality != "original" or aspect != "none" or wm_on
-    vf: list[str] = []
-
-    if aspect == "21:9":
-        vf.append("crop=ih*21/9:ih")
-    elif aspect == "16:9":
-        vf.append("crop=min(iw\\,ih*16/9):min(ih\\,iw*9/16)")
-    elif aspect == "4:5":
-        vf.append("crop=ih*4/5:ih")
-    elif aspect == "bars":
-        vf += ["scale=-2:720", "pad=1280:720:(ow-iw)/2:(oh-ih)/2:black"]
-    elif aspect == "zoom":
-        vf += ["scale=1920:1080:force_original_aspect_ratio=increase", "crop=1920:1080"]
-    elif aspect == "1280x720":
-        vf.append("scale=1280:720")
-
-    res_map = {"480": "-2:480", "576": "-2:576", "640": "-2:640", "720": "-2:720", "1080": "-2:1080"}
-    if quality in res_map and aspect not in ("bars", "zoom", "1280x720"):
-        vf.append(f"scale={res_map[quality]}")
-
-    extra_inputs: list[str] = []
-
-    if wm_on:
-        dur_sec  = setup.get("duration_sec", 0) or time_to_seconds(setup.get("timestamp", "0"))
-        wm_start = max(0, dur_sec - 120)
-        wm_img   = _watermark_img_path()
-
-        if wm_img:
-            # ── Image overlay via filter_complex ─────────────────────────────
-            needs_encode = True
-            extra_inputs = ["-i", wm_img]
-            pos_map_img  = {
-                "top_left":      "19:80",
-                "top_center":    "(W-w)/2:46",
-                "top_right":     "W-w-20:80",
-                "center":        "(W-w)/2:(H-h)/2",
-                "bottom_left":   "20:H-h-60",
-                "bottom_center": "(W-w)/2:H-h-10",
-                "bottom_right":  "W-w-20:H-h-60",
-            }
-            img_pos = pos_map_img.get(setup["watermark_pos"], "W-w-10:H-h-10")
-            _wm_sz = get_watermark_size()
-            if vf:
-                fc = (f"[0:v]{','.join(vf)}[_vs];"
-                      f"[1:v]scale={_wm_sz}:-1[_wm];"
-                      f"[_vs][_wm]overlay={img_pos}:enable='gte(t,{wm_start})'[_out]")
-            else:
-                fc = (f"[1:v]scale={_wm_sz}:-1[_wm];"
-                      f"[0:v][_wm]overlay={img_pos}:enable='gte(t,{wm_start})'[_out]")
-
-            sel_tracks = setup["audio_track"]
-            post: list[str] = ["-filter_complex", fc, "-map", "[_out]"]
-            if not sel_tracks:
-                post += ["-map", "0:a?"]
-            else:
-                for t in sorted(sel_tracks):
-                    post += ["-map", f"0:a:{t-1}?"]
-            crf = "23" if quality in ("480", "576", "640") else "21"
-            abr = "192k" if quality == "1080" else "128k"
-            post += ["-c:v", "libx264", "-preset", "veryfast", "-crf", crf,
-                     "-c:a", "aac", "-b:a", abr]
-            return extra_inputs, post, needs_encode
-
+    def do_GET(self):
+        proxy = self.server.dash_proxy
+        request_path = urlsplit(self.path).path
+        if request_path == "/selected_dvr.mpd":
+            try:
+                with open(proxy["mpd_path"], "rb") as manifest_file:
+                    payload = manifest_file.read()
+                content_type = "application/dash+xml"
+            except OSError:
+                self.send_error(404)
+                return
+        elif request_path.startswith("/dash/"):
+            relative_path = unquote(request_path[len("/dash/"):])
+            upstream_url = urljoin(proxy["base_url"], relative_path)
+            try:
+                response = requests.get(
+                    upstream_url,
+                    headers=proxy["headers"],
+                    timeout=(10, 45),
+                )
+                payload = response.content
+                if response.status_code != 200:
+                    self.send_response(response.status_code)
+                    self.send_header("Content-Length", str(len(payload)))
+                    self.end_headers()
+                    self.wfile.write(payload)
+                    return
+                content_type = response.headers.get(
+                    "Content-Type", "application/octet-stream"
+                )
+            except requests.RequestException as exc:
+                self.send_error(502, str(exc)[:160])
+                return
         else:
-            # ── Fallback: text watermark (drawtext) ───────────────────────────
-            pos_map_txt = {
-                "top_left":      "x=19:y=80",
-                "top_center":    "x=(w-tw)/2:y=46",
-                "top_right":     "x=w-tw-20:y=80",
-                "center":        "x=(w-tw)/2:y=(h-th)/2",
-                "bottom_left":   "x=20:y=h-th-60",
-                "bottom_center": "x=(w-tw)/2:y=h-th-10",
-                "bottom_right":  "x=w-tw-20:y=h-th-60",
-            }
-            xy   = pos_map_txt.get(setup["watermark_pos"], "x=10:y=10")
-            safe = ((setup.get("watermark_text") or get_default_watermark())
-                    .replace("\\", "\\\\").replace("'", "\\'").replace(":", "\\:"))
-            vf.append(f"drawtext=text='{safe}':fontsize=28:fontcolor=white"
-                      f":box=1:boxcolor=black@0.4:boxborderw=4:{xy}"
-                      f":enable='gte(t,{wm_start})'")
+            self.send_error(404)
+            return
 
-    post: list[str] = []
-    sel_tracks = setup["audio_track"]
-    if not sel_tracks:
-        post += ["-map", "0:v?", "-map", "0:a?"]
-    else:
-        post += ["-map", "0:v?"]
-        for t in sorted(sel_tracks):
-            post += ["-map", f"0:a:{t - 1}?"]
+        self.send_response(200)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(payload)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(payload)
 
-    if needs_encode:
-        if vf:
-            post += ["-vf", ",".join(vf)]
-        crf = "23" if quality in ("480", "576", "640") else "21"
-        abr = "192k" if quality == "1080" else "128k"
-        post += ["-c:v", "libx264", "-preset", "veryfast", "-crf", crf,
-                 "-c:a", "aac", "-b:a", abr]
-    else:
-        post += ["-c:v", "copy", "-c:a", "copy"]
-    return extra_inputs, post, needs_encode
+    def log_message(self, *_args):
+        return
 
-# ---------------------------------------------------------------------------
-# Audio track probe (for the wizard's first step)
-# ---------------------------------------------------------------------------
 
-async def _probe_audio_tracks(url: str, timeout_sec: int = 15) -> list:
-    """Probe a stream URL and return list of audio track dicts."""
-    cmd = shlex.split(
-        f'ffprobe -v quiet -hide_banner -print_format json '
-        f'-show_streams -select_streams a '
-        f'-user_agent "{DEFAULT_USER_AGENT}" '
-        f'-probesize 5000000 -analyzeduration 5000000 '
-        f'-i {shlex.quote(url)}'
+def _start_dash_proxy(mpd_path: str, channel: dict):
+    """Start an authenticated local proxy for FFmpeg's nested DASH requests."""
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _DashProxyHandler)
+    server.dash_proxy = {
+        "mpd_path": mpd_path,
+        "base_url": urljoin(channel["stream_url"], "dash/"),
+        "headers": {
+            key: value for key, value in {
+                "Cookie": channel.get("cookie", ""),
+                "User-Agent": channel.get("user_agent", ""),
+            }.items() if value
+        },
+    }
+    thread = threading.Thread(
+        target=server.serve_forever,
+        name="dash-recording-proxy",
+        daemon=True,
     )
+    thread.start()
+    return server, f"http://127.0.0.1:{server.server_port}/selected_dvr.mpd"
+
+
+def _set_static_mpd_base_url(mpd_path: str, base_url: str):
+    namespace_uri = "urn:mpeg:dash:schema:mpd:2011"
+    namespace = {"dash": namespace_uri}
+    tree = ET.parse(mpd_path)
+    root = tree.getroot()
+    for base in root.findall(".//dash:BaseURL", namespace):
+        base.text = base_url
+    ET.register_namespace("", namespace_uri)
+    tree.write(mpd_path, encoding="utf-8", xml_declaration=True)
+
+
+async def _test_live_start_index(channel: dict, start_index: int) -> tuple[str, str]:
+    """Test the HLS-only option against the current channel input."""
+    stream_url = channel.get("stream_url", "")
+    cookie = channel.get("cookie", "")
+    user_agent = channel.get("user_agent", "")
+    license_url = channel.get("license_key", "")
+    cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin", "-y"]
+    if cookie or user_agent:
+        headers = ""
+        if cookie:
+            headers += f"Cookie: {cookie}\r\n"
+        if user_agent:
+            headers += f"User-Agent: {user_agent}\r\n"
+        cmd += ["-headers", headers]
+    if user_agent:
+        cmd += ["-user_agent", user_agent]
+    if cookie:
+        cmd += ["-cookies", cookie]
+    if license_url:
+        key_hex = await asyncio.get_running_loop().run_in_executor(
+            None, _fetch_cenc_key, stream_url, license_url, cookie, user_agent
+        )
+        if key_hex:
+            cmd += ["-cenc_decryption_key", key_hex]
+    cmd += [
+        "-live_start_index", str(start_index),
+        "-rw_timeout", "8000000",
+        "-i", stream_url,
+        "-map", "0:v:0",
+        "-t", "1",
+        "-f", "null",
+        "-",
+    ]
     try:
         proc = await asyncio.create_subprocess_exec(
-            *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            *cmd,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.PIPE,
         )
-        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout_sec)
-        data = json.loads(stdout.decode(errors="ignore") or "{}")
-        tracks = []
-        for s in data.get("streams", []):
-            tags  = s.get("tags") or {}
-            lang  = (tags.get("language") or "und").lower()[:3]
-            title = tags.get("title") or tags.get("handler_name") or ""
-            tracks.append({
-                "stream_idx": len(tracks),   # 0-based position among audio streams
-                "lang":       lang,
-                "title":      title,
-                "channels":   s.get("channels", 2),
-                "codec":      s.get("codec_name", "?"),
-            })
-        return tracks
-    except asyncio.TimeoutError:
-        LOG.warning(f"Audio probe timed out for {url}")
-        return []
-    except Exception as e:
-        LOG.warning(f"Audio probe failed for {url}: {e}")
-        return []
-
-
-def _audio_track_label(track: dict) -> str:
-    lang  = track["lang"]
-    label = LANG_LABEL.get(lang, lang.upper())
-    title = (track.get("title") or "").strip()
-    ch    = track.get("channels", 2)
-    ch_s  = "stereo" if ch == 2 else ("mono" if ch == 1 else f"{ch}ch")
-    if title and title.lower() != label.lower():
-        return f"{label} ({title}) [{ch_s}]"
-    return f"{label} [{ch_s}]"
-
-
-def _kb_audio_step(setup: dict) -> InlineKeyboardMarkup:
-    uid    = setup["user_id"]
-    tracks = setup.get("detected_audio_tracks", [])
-    sel    = setup["audio_track"]   # [] = all tracks, [1,2,...] = specific 1-based indices
-    all_selected = (not sel)
-    rows   = []
-
-    buttons = []
-    for i, t in enumerate(tracks, 1):
-        lang  = t.get("lang", "?")
-        codec = t.get("codec", "?").upper()
-        code  = lang.upper()[:3]
-        icon  = "✅ " if (all_selected or i in sel) else ""
-        buttons.append(InlineKeyboardButton(
-            f"{icon}{code} ({codec})",
-            callback_data=f"rs:{uid}:audio_toggle:{i}"
-        ))
-    for i in range(0, len(buttons), 2):
-        rows.append(buttons[i:i + 2])
-
-    all_icon = "✅" if all_selected else "🔄"
-    rows.append([InlineKeyboardButton(
-        f"{all_icon} Select All Tracks",
-        callback_data=f"rs:{uid}:audio_select_all"
-    )])
-
-    rows.append([
-        InlineKeyboardButton("◀️ Back",              callback_data=f"rs:{uid}:cancel"),
-        InlineKeyboardButton("✅ Next: Watermark →",  callback_data=f"rs:{uid}:next_wm"),
-    ])
-    return InlineKeyboardMarkup(rows)
-
-
-def _audio_step_text(setup: dict) -> str:
-    tracks = setup.get("detected_audio_tracks", [])
-    lines  = [
-        "**🎙 Step 1 — Audio Track**\n",
-        f"Duration: `{setup['timestamp']}`  |  File: `{setup['filename']}`\n",
-    ]
-    if tracks:
-        lines.append(f"Found **{len(tracks)}** audio track(s):\n")
-        for i, t in enumerate(tracks, 1):
-            lines.append(f"`{i}.` {_audio_track_label(t)}")
-    else:
-        lines.append("_No audio track info (stream will include all audio)._")
-    lines.append("\n👇 Choose an audio track, then tap **Next**:")
-    return "\n".join(lines)
-
-
-# ---------------------------------------------------------------------------
-# Flag parser for /rec and /drec inline flags
-# ---------------------------------------------------------------------------
-
-def _parse_rec_flags(tokens: list) -> dict:
-    """Parse optional recording flags from a list of CLI-style tokens.
-
-    Supported flags:
-      -aes  <32-char hex>   AES-128 decryption key (HLS)
-      -cookie <value>       HTTP Cookie header value
-      -ua / -user_agent     User-Agent string
-      -referer <value>      Referer header
-      -headers <value>      ffprobe-style multi-header string (Key: Value\\r\\nKey: Value...)
-      -i <url>              Input URL (ffprobe/ffmpeg style)
-      -t <HH:MM:SS>         Duration / timestamp (ffprobe style)
-      -license <url>        ClearKey DRM license URL (for DASH/MPD streams)
-      -drm  <scheme>        DRM scheme hint (clearkey / none)
-      -aio                  (no-op / allow-input-override marker)
-    """
-    flags: dict = {}
-    i = 0
-    while i < len(tokens):
-        t = tokens[i].lstrip("-").lower()
-        if t in ("aes", "key") and i + 1 < len(tokens):
-            flags["aes_key"] = tokens[i + 1].strip()
-            i += 2
-        elif t in ("cookie", "cookies", "c") and i + 1 < len(tokens):
-            flags["cookie"] = tokens[i + 1]
-            i += 2
-        elif t in ("ua", "user-agent", "useragent", "user_agent") and i + 1 < len(tokens):
-            flags["user_agent"] = tokens[i + 1]
-            i += 2
-        elif t in ("referer", "ref") and i + 1 < len(tokens):
-            flags["referer"] = tokens[i + 1]
-            i += 2
-        elif t in ("origin", "org") and i + 1 < len(tokens):
-            flags["origin"] = tokens[i + 1]
-            i += 2
-        elif t in ("headers", "headers_str") and i + 1 < len(tokens):
-            # ffprobe-style: "Cookie: val\r\nOrigin: val\r\nReferer: val\r\n"
-            # Handle both literal \r\n (from shell $'...') and actual CRLF/LF
-            raw = tokens[i + 1]
-            raw = raw.replace("\\r\\n", "\n").replace("\\n", "\n").replace("\r\n", "\n").replace("\r", "\n")
-            for line in raw.split("\n"):
-                line = line.strip()
-                if ":" not in line:
-                    continue
-                hk, hv = line.split(":", 1)
-                hk = hk.strip().lower()
-                hv = hv.strip()
-                if hk == "cookie" and not flags.get("cookie"):
-                    flags["cookie"] = hv
-                elif hk == "origin" and not flags.get("origin"):
-                    flags["origin"] = hv
-                elif hk == "referer" and not flags.get("referer"):
-                    flags["referer"] = hv
-            i += 2
-        elif t in ("i", "input") and i + 1 < len(tokens):
-            # ffprobe/ffmpeg: -i <url>
-            flags["input_url"] = tokens[i + 1]
-            i += 2
-        elif t in ("t", "time", "duration") and i + 1 < len(tokens):
-            # ffprobe/ffmpeg duration: -t HH:MM:SS
-            flags["timestamp"] = tokens[i + 1]
-            i += 2
-        elif t in ("license", "lic", "licurl", "license_url") and i + 1 < len(tokens):
-            flags["license_url"] = tokens[i + 1]
-            i += 2
-        elif t in ("drm", "drmscheme", "drm_scheme") and i + 1 < len(tokens):
-            flags["drm_scheme"] = tokens[i + 1].lower()
-            i += 2
-        elif t == "aio":
-            flags["aio"] = True
-            i += 1
-        else:
-            i += 1
-    return flags
-
-
-def _parse_cloudplay_format(text: str):
-    """Parse the multi-line CloudPlay/JSON-ish format used by streaming apps.
-
-    Supported formats:
-
-    Format A (with -- separator):
-        /rec
-            "user_agent": "...",
-        --
-            "mpd_url": "https://...index.mpd|drmScheme=clearkey",
-            "license_url": "https://...",  -t HH:MM:SS filename
-
-    Format B (single block, with nested "headers": {}):
-        /rec
-            "user_agent": "...",
-            "m3u8_url": "https://...",
-            "headers": {
-              "Cookie": "hdntl=...",
-              "Origin": "https://www.hotstar.com",
-              "Referer": "https://www.hotstar.com/"  -t 00:30:00 filename
-            }
-
-    Returns (url, timestamp, filename, flags_dict) or None if not this format.
-    """
-    import re as _re
-
-    _URL_KEYS = ("mpd_url", "m3u8_url", "hls_url", "stream_url", "url")
-
-    # Quick bail: must look like a JSON-ish block (at least one quoted key)
-    if not _re.search(r'"[a-z_A-Z]+"\\s*:', text):
-        # Try bare check — at least one of the URL keys must be present
-        has_url_key = any(f'"{k}"' in text for k in _URL_KEYS)
-        if not has_url_key:
-            return None
-
-    def _kv_flat(section: str) -> dict:
-        """Extract top-level "key": "value" pairs (ignores nested blocks)."""
-        pairs: dict = {}
-        for m in _re.finditer(r'"([^"]+)"\s*:\s*"([^"]*)"', section):
-            pairs[m.group(1).lower()] = m.group(2)
-        return pairs
-
-    def _kv_nested(block: str) -> dict:
-        """Extract key-value pairs from inside a { } block (case-preserved keys)."""
-        pairs: dict = {}
-        for m in _re.finditer(r'"([^"]+)"\s*:\s*"([^"]*)"', block):
-            pairs[m.group(1)] = m.group(2)
-        return pairs
-
-    # ── Split on -- if present (Format A) ───────────────────────────────────
-    if "--" in text:
-        parts      = text.split("--", 1)
-        header_raw = parts[0]
-        body_raw   = parts[1]
-        top_kv     = _kv_flat(header_raw)
-        top_kv.update(_kv_flat(body_raw))
-        remaining_src = body_raw
-    else:
-        # Format B — whole text is one block
-        top_kv        = _kv_flat(text)
-        remaining_src = text
-
-    # ── Extract nested "headers": { ... } block ─────────────────────────────
-    nested_headers: dict = {}
-    hdr_match = _re.search(r'"[Hh]eaders"\s*:\s*\{([^}]*)\}', text, _re.DOTALL)
-    if hdr_match:
-        nested_headers = _kv_nested(hdr_match.group(1))
-        # Remove headers block from remaining text so -t parsing isn't confused
-        remaining_src = text[:hdr_match.start()] + " " + hdr_match.group(1) + " "
-
-    # ── Resolve stream URL ───────────────────────────────────────────────────
-    raw_url = ""
-    for k in _URL_KEYS:
-        raw_url = top_kv.get(k, "")
-        if raw_url:
-            break
-    if not raw_url:
-        return None
-
-    # Strip pipe-separated params:  url|drmScheme=clearkey|...
-    url        = raw_url.split("|")[0].strip()
-    drm_scheme = ""
-    for seg in raw_url.split("|")[1:]:
-        if seg.lower().startswith("drmscheme="):
-            drm_scheme = seg.split("=", 1)[1].lower()
-
-    # ── Collect flags ────────────────────────────────────────────────────────
-    license_url = top_kv.get("license_url", "")
-    user_agent  = top_kv.get("user_agent", "") or top_kv.get("useragent", "")
-
-    # Cookie / Origin / Referer — prefer nested headers block, fall back to top-level
-    def _nget(key: str) -> str:
-        """Case-insensitive lookup in nested_headers dict."""
-        for k, v in nested_headers.items():
-            if k.lower() == key.lower():
-                return v
-        return ""
-
-    cookie  = _nget("cookie")  or top_kv.get("cookie", "")
-    referer = _nget("referer") or top_kv.get("referer", "")
-    origin  = _nget("origin")  or top_kv.get("origin", "")
-
-    # ── Find -t timestamp and optional filename in trailing text ─────────────
-    # Strip all "key": "value" pairs from remaining to isolate free text
-    remaining = _re.sub(r'"[^"]*"\s*:\s*"[^"]*"\s*,?\s*', "", remaining_src)
-    remaining = _re.sub(r'\s+', ' ', remaining).strip()
-
-    timestamp = ""
-    filename  = DEFAULT_FILENAME
-    t_m = _re.search(r'-t\s+(\d{1,2}:\d{2}:\d{2})', remaining)
-    if not t_m:
-        t_m = _re.search(r'\b(\d{1,2}:\d{2}:\d{2})\b', remaining)
-    if t_m:
-        timestamp = t_m.group(1)
-        after     = remaining[t_m.end():].strip()
-        fn_tokens = [tok for tok in after.split() if not tok.startswith("-")]
-        if fn_tokens:
-            filename = fn_tokens[0]
-
-    flags: dict = {}
-    if license_url: flags["license_url"] = license_url
-    if drm_scheme:  flags["drm_scheme"]  = drm_scheme
-    if user_agent:  flags["user_agent"]  = user_agent
-    if cookie:      flags["cookie"]      = cookie
-    if referer:     flags["referer"]     = referer
-    if origin:      flags["origin"]      = origin
-
-    return url, timestamp, filename, flags
-
-
-def _fetch_clearkey_keys_sync(license_url: str, extra_headers: dict = {}) -> str:
-    """Synchronously fetch ClearKey decryption key(s) from a license URL.
-
-    Returns a string for FFmpeg's -decryption_key:
-      - "kid_hex:key_hex"  when the server returns a JWK set
-      - "key_hex"          when the server returns a raw or simplified key
-    """
-    import urllib.request
-    import base64 as _b64
-    import json as _json
-
-    def _b64url_hex(s: str) -> str:
-        pad = 4 - (len(s) % 4)
-        s  += "=" * (pad if pad != 4 else 0)
-        return _b64.urlsafe_b64decode(s).hex()
-
-    req_headers = {"User-Agent": "Mozilla/5.0", **extra_headers}
-    req = urllib.request.Request(license_url, headers=req_headers)
-    with urllib.request.urlopen(req, timeout=15) as r:
-        body = r.read()
-
-    # ── Try JSON / JWK ClearKey format ───────────────────────────────────────
-    try:
-        data = _json.loads(body)
-
-        # Standard ClearKey JWK  {"keys": [{"kty":"oct","k":"...","kid":"..."}], ...}
-        if "keys" in data and data["keys"]:
-            entry   = data["keys"][0]
-            key_b64 = entry.get("k", "")
-            kid_b64 = entry.get("kid", "")
-            if key_b64:
-                key_hex = _b64url_hex(key_b64)
-                if kid_b64:
-                    return f"{_b64url_hex(kid_b64)}:{key_hex}"
-                return key_hex
-
-        # Flat dict  {"key": "hexstring"}  or {"content_key": "..."}
-        for field in ("key", "content_key", "decryption_key", "aes_key"):
-            val = data.get(field, "")
-            if isinstance(val, str) and val.strip():
-                return val.strip()
-
-        # {"data": {"key": "..."}}
-        nested = data.get("data") or data.get("result") or {}
-        if isinstance(nested, dict):
-            for field in ("key", "content_key"):
-                val = nested.get(field, "")
-                if isinstance(val, str) and val.strip():
-                    return val.strip()
-
-    except (ValueError, TypeError):
-        pass
-
-    # ── Plain hex / base64 body ───────────────────────────────────────────────
-    raw = body.decode("utf-8", errors="ignore").strip().replace(" ", "").replace("\n", "")
-    # Hex key (16 or 32 bytes = 32 or 64 hex chars)
-    if len(raw) in (32, 64) and all(c in "0123456789abcdefABCDEF" for c in raw):
-        return raw
-    # Base64 key (16 bytes → 24 chars with padding, 32 bytes → 44 chars)
-    try:
-        decoded = _b64.urlsafe_b64decode(raw + "==")
-        if len(decoded) in (16, 32):
-            return decoded.hex()
-    except Exception:
-        pass
-
-    raise Exception(f"Unrecognised ClearKey license response: {body[:120]}")
-
-
-async def _prepare_aes_input(url: str, hex_key: str, extra_headers: dict,
-                              save_dir: str) -> str:
-    """Fetch HLS manifest, write key to a local bin file, patch the manifest
-    to use that local key, and return the path to the patched .m3u8 file."""
-    import urllib.request
-    from urllib.parse import urljoin
-    import re as _re
-
-    key_bytes = bytes.fromhex(hex_key.replace(" ", ""))
-    key_path  = join(save_dir, "hls_key.bin")
-    with open(key_path, "wb") as kf:
-        kf.write(key_bytes)
-
-    def _fetch(target_url: str) -> str:
-        req = urllib.request.Request(target_url, headers=extra_headers)
-        with urllib.request.urlopen(req, timeout=15) as r:
-            return r.read().decode("utf-8", errors="ignore")
-
-    content = _fetch(url)
-
-    # If master playlist, follow first variant
-    if "#EXT-X-STREAM-INF" in content:
-        base = url.rsplit("/", 1)[0] + "/"
-        for line in content.splitlines():
-            if line.strip() and not line.startswith("#"):
-                variant_url = line.strip() if line.startswith("http") else urljoin(base, line.strip())
-                content     = _fetch(variant_url)
-                url         = variant_url
-                break
-
-    base_url = url.rsplit("/", 1)[0] + "/"
-    patched_lines = []
-    for line in content.splitlines():
-        if "#EXT-X-KEY" in line and "AES-128" in line:
-            line = _re.sub(r'URI="[^"]*"', f'URI="file://{key_path}"', line)
-        elif line.strip() and not line.startswith("#") and not line.lower().startswith("http"):
-            line = urljoin(base_url, line.strip())
-        patched_lines.append(line)
-
-    patched_path = join(save_dir, "patched_input.m3u8")
-    with open(patched_path, "w") as mf:
-        mf.write("\n".join(patched_lines))
-    return patched_path
-
-
-# ---------------------------------------------------------------------------
-# handle_record — parse params, probe audio, show pre-recording setup wizard
-# ---------------------------------------------------------------------------
-
-async def handle_record(client: Client, message: Message):
-    user_id = message.from_user.id
-    params  = " ".join(message.command[1:])
-    parts   = params.split(" ", 2)
-    if len(parts) < 2:
-        return await message.reply_text("Bad arguments. Use `/rec <link> HH:MM:SS <filename>`.")
-    url          = parts[0]
-    timestamp    = parts[1]
-    raw_filename = parts[2].strip() if len(parts) > 2 else DEFAULT_FILENAME
-    for bad in '/\\:*?"<>|':
-        raw_filename = raw_filename.replace(bad, "_")
-
-    dur_sec = time_to_seconds(timestamp)
-    setup: dict = {
-        "user_id":        user_id,
-        "chat_id":        message.chat.id,
-        "orig_msg":       message,
-        "url":            url,
-        "timestamp":      timestamp,
-        "duration_sec":   dur_sec,
-        "filename":       raw_filename,
-        "watermark_on":   False,
-        "watermark_pos":  "bottom_right",
-        "watermark_text": get_default_watermark(),
-        "audio_track":    [],
-        "auto_mode":      False,
-        "quality":        "original",
-        "aspect":         "none",
-        "step":           0,
-        "detected_audio_tracks": [],
-    }
-    rec_setup_sessions[user_id] = setup
-
-    # Probe audio tracks from the stream before showing the wizard
-    probe_msg = await message.reply_text(
-        "🔍 **Probing stream for audio tracks…**"
-    )
-    setup["setup_msg_id"] = probe_msg.id
-
-    # Effective URL after redirect/page extraction
-    probe = await probe_stream(url)
-    effective_url = probe["final_url"]
-    tracks = await _probe_audio_tracks(effective_url)
-    setup["detected_audio_tracks"] = tracks
-    setup["effective_url"]         = effective_url
-    setup["is_hls"]                = probe["is_hls"]
-
-    await probe_msg.edit_text(_audio_step_text(setup), reply_markup=_kb_audio_step(setup))
-
-# ---------------------------------------------------------------------------
-# do_record — actual FFmpeg recording (called after wizard confirmation)
-# ---------------------------------------------------------------------------
-
-async def do_record(client: Client, query: CallbackQuery, setup: dict):
-    user_id   = setup["user_id"]
-    chat_id   = setup["chat_id"]
-    url       = setup["url"]
-    timestamp = setup["timestamp"]
-    filename  = setup["filename"]
-    orig_msg  = setup.get("orig_msg")
-    rec_id    = int(time.time() * 1000) % 10**9   # unique per-recording slot
-
-    # ── Quota check — non-owners must have Rec credits ───────────────────────
-    if not is_owner(user_id):
-        ok, quota_msg = use_rec(user_id)
-        if not ok:
-            return await client.send_message(chat_id, quota_msg)
-
-    save_dir: Optional[str]   = None
-    video_path: Optional[str] = None
-
-    msg = await client.send_message(chat_id, "⚙️ Initializing recording...")
-
-    try:
-        raw_filename = filename
-        for bad in '/\\:*?"<>|':
-            raw_filename = raw_filename.replace(bad, "_")
-        mkv_filename = f"{raw_filename}.mkv"
-        save_dir     = join(DOWNLOAD_DIRECTORY, str(int(time.time())))
-        os.makedirs(save_dir, exist_ok=True)
-        video_path   = join(save_dir, mkv_filename)
-
-        recording_start = time.time()
-        duration        = time_to_seconds(timestamp)
-
-        rec_entry = {
-            "start":         recording_start,
-            "status":        {
-                "filename": raw_filename, "target": timestamp,
-                "progress": "00:00:00", "save_dir": save_dir,
-            },
-            "ffmpeg_pid":    None,
-            "progress_task": None,
-            "effective_url": None,
-            "is_hls":        False,
-            "is_photo_msg":  False,
-            "snap_path":     None,
-        }
-        active_recs.setdefault(user_id, {})[rec_id] = rec_entry
-
-        def _build_progress_text() -> str:
-            elapsed = time.time() - recording_start
-            pct     = min((elapsed / duration) * 100, 100) if duration > 0 else 0
-            bar     = "●" * int(10 * pct // 100) + "⬜" * (10 - int(10 * pct // 100))
-            task_id = hex(rec_id)[2:10]
-            active_recs[user_id][rec_id]["status"]["progress"] = TimeFormatter(int(elapsed * 1000))
-            q_str  = f"{setup['quality']}p" if setup["quality"] != "original" else "Original"
-            wm_str = setup["watermark_pos"].replace("_", " ").title() if setup["watermark_on"] else "Off"
-            slot_n = list(active_recs.get(user_id, {}).keys()).index(rec_id) + 1
-            return (
-                f"🎬 **Recording #{slot_n} in Progress...**\n\n"
-                f"📡 Stream Capture\n"
-                f"[{bar}]  {pct:.1f}%\n"
-                f"⏱ Time  : {TimeFormatter(int(elapsed*1000))} / {TimeFormatter(duration*1000)}\n"
-                f"🆔 Task  : {task_id}\n\n"
-                f"📺 Quality: `{q_str}` | 💧 WM: `{wm_str}`\n"
-                f"_Press **Gen Preview** for a live thumbnail_"
-            )
-
-        async def update_recording_progress():
-            while rec_id in active_recs.get(user_id, {}):
-                if (user_id, rec_id) in cancelled_recs:
-                    break
-                kb = _rec_progress_kb(user_id, rec_id)
-                text = _build_progress_text()
-                try:
-                    entry = active_recs.get(user_id, {}).get(rec_id, {})
-                    if entry.get("is_photo_msg"):
-                        await msg.edit_caption(text, reply_markup=kb)
-                    else:
-                        await msg.edit_text(text, reply_markup=kb)
-                except Exception:
-                    pass
-                await asyncio.sleep(5)
-
-        progress_task = asyncio.create_task(update_recording_progress())
-        rec_entry["progress_task"] = progress_task
-
-        # Detect MPD/DASH early (skip HLS probe for DASH streams)
-        is_mpd = ".mpd" in url.lower() or (setup.get("drm_scheme", "") in ("clearkey", "widevine"))
-
-        _pkb = _rec_progress_kb(user_id, rec_id)   # keyboard shorthand for probe phase
-
-        # Re-use probe result from wizard if available (avoids double-probe)
-        if setup.get("effective_url"):
-            effective_url  = setup["effective_url"]
-            # Use probe-detected is_hls from wizard; fall back to .m3u8 URL check.
-            # Do NOT use (effective_url != url) — a redirect to a .ts endpoint is
-            # raw MPEG-TS, not HLS, and -f hls would cause "Invalid data" errors.
-            is_hls         = setup.get("is_hls", False) or ".m3u8" in effective_url.lower()
-            extracted_from = None
-            await msg.edit_text("▶️ Starting recording...", reply_markup=_pkb)
-        elif is_mpd:
-            # DASH/MPD — skip probe, use URL directly
-            effective_url  = url
-            is_hls         = False
-            extracted_from = None
-            await msg.edit_text("📡 DASH stream detected — starting recording...", reply_markup=_pkb)
-        else:
-            await msg.edit_text("🔍 Probing stream...", reply_markup=_pkb)
-            probe          = await probe_stream(url)
-            effective_url  = probe["final_url"]
-            is_hls         = probe["is_hls"]
-            extracted_from = probe.get("extracted_from")
-            # Force HLS if URL ends with .m3u8 regardless of probe content-type
-            if not is_hls and ".m3u8" in effective_url.lower():
-                is_hls = True
-                LOG.info(f"Probe uid={user_id}: forcing HLS=True (url has .m3u8), changed={'yes' if effective_url!=url else 'no'}")
-            else:
-                LOG.info(f"Probe uid={user_id}: hls={is_hls}, changed={'yes' if effective_url!=url else 'no'}")
-            if extracted_from:
-                await msg.edit_text("Found embedded HLS stream — starting recording...", reply_markup=_pkb)
-            else:
-                await msg.edit_text("▶️ Starting recording...", reply_markup=_pkb)
-
-        # Store stream info in rec_entry for Gen Preview callback
-        rec_entry["effective_url"] = effective_url
-        rec_entry["is_hls"]        = is_hls
-
-        # User-specified flags override probe-detected values
-        probe_obj  = probe if not setup.get("effective_url") and not is_mpd else {}
-        referer    = setup.get("flag_referer") or probe_obj.get("referer", "")
-        user_agent = setup.get("flag_ua") or probe_obj.get("user_agent", DEFAULT_USER_AGENT)
-
-        # Build combined extra headers (cookie + referer + origin)
-        extra_headers: dict = {}
-        if setup.get("flag_cookie"):
-            extra_headers["Cookie"] = setup["flag_cookie"]
-        if referer:
-            extra_headers["Referer"] = referer
-        # Use explicit origin flag, or auto-derive from referer (scheme+host only)
-        origin = setup.get("flag_origin", "")
-        if not origin and referer:
-            from urllib.parse import urlparse as _urlparse
-            _p = _urlparse(referer)
-            if _p.scheme and _p.netloc:
-                origin = f"{_p.scheme}://{_p.netloc}"
-        if origin:
-            extra_headers["Origin"] = origin
-
-        # ── AES key (HLS): patch m3u8 manifest with local key file ─────────
-        ffmpeg_input  = effective_url
-        clearkey_arg  = ""   # for DASH ClearKey
-        if setup.get("aes_key") and not is_mpd:
-            try:
-                await msg.edit_text("🔑 Patching AES key into manifest…", reply_markup=_pkb)
-                ffmpeg_input = await _prepare_aes_input(
-                    url, setup["aes_key"], extra_headers, save_dir
-                )
-                is_hls = True
-                rec_entry["effective_url"] = ffmpeg_input
-                LOG.info(f"AES patch OK uid={user_id} patched={ffmpeg_input}")
-            except Exception as e:
-                LOG.warning(f"AES patch failed: {e} — falling back to original URL")
-                ffmpeg_input = effective_url
-            await msg.edit_text("▶️ Starting recording…", reply_markup=_pkb)
-
-        # ── ClearKey DRM (DASH/MPD): fetch keys from license URL ───────────
-        if setup.get("license_url"):
-            try:
-                await msg.edit_text("🔑 Fetching ClearKey DRM license…", reply_markup=_pkb)
-                ck = await asyncio.to_thread(
-                    _fetch_clearkey_keys_sync, setup["license_url"], extra_headers
-                )
-                if ck:
-                    clearkey_arg = ck
-                    LOG.info(f"ClearKey key fetched uid={user_id}: {ck[:8]}…")
-                await msg.edit_text("▶️ Starting recording…", reply_markup=_pkb)
-            except Exception as e:
-                LOG.warning(f"ClearKey license fetch failed: {e} — recording without decryption key")
-                await msg.edit_text(f"⚠️ ClearKey fetch failed: `{e}`\n▶️ Continuing without key…", reply_markup=_pkb)
-
-        args: list[str] = [
-            "ffmpeg", "-hide_banner", "-loglevel", "error", "-nostats", "-y",
-            "-user_agent", user_agent,
-            # Auto-reconnect on network drops
-            "-reconnect",          "1",
-            "-reconnect_streamed", "1",
-            "-reconnect_delay_max","15",
-            "-reconnect_on_network_error", "1",
-            # TCP buffer
-            "-rw_timeout",         "10000000",   # 10 s I/O timeout (µs)
-        ]
-        # Combine all extra HTTP headers into one -headers block
-        if extra_headers:
-            hdr_str = "".join(f"{k}: {v}\r\n" for k, v in extra_headers.items())
-            args += ["-headers", hdr_str]
-
-        # ClearKey decryption key for DASH
-        if clearkey_arg:
-            args += ["-decryption_key", clearkey_arg]
-
-        # Stream format / demuxer
-        if is_mpd:
-            args += ["-allowed_extensions", "ALL"]
-        elif is_hls:
-            args += ["-f", "hls", "-allowed_extensions", "ALL"]
-        args += [
-            "-probesize",          "20000000",   # 20 MB
-            "-analyzeduration",    "8000000",    # 8 s
-            "-thread_queue_size",  "512",
-            "-i", ffmpeg_input,
-        ]
-        if setup.get("watermark_on"):
-            await _async_ensure_watermark_img()
-        extra_inputs, extra_post, re_encodes = _build_vf_and_codec(setup)
-        args += extra_inputs
-        args += extra_post
-
-        # ── Audio track metadata branding ──────────────────────────────────
-        # Embeds channel name in every audio track so it survives re-upload /
-        # forward. Visible in VLC → Track Info, MX Player audio selector, and
-        # Telegram's audio track dropdown.
-        _brand = get_audio_brand_name()
-        for _i in range(3):
-            args += [
-                f"-metadata:s:a:{_i}", f"title={_brand}",
-                f"-metadata:s:a:{_i}", f"handler_name={_brand}",
-            ]
-
-        args += [
-            # H264 resilience: ignore decode errors in live streams
-            "-fflags", "+discardcorrupt+genpts",
-            "-err_detect", "ignore_err",
-            "-t", str(duration), video_path,
-        ]
-
-        ffmpeg_process = await asyncio.create_subprocess_exec(
-            *args, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-        )
-        rec_entry["ffmpeg_pid"] = ffmpeg_process.pid
-        LOG.info(f"FFmpeg pid={ffmpeg_process.pid} user={user_id} rec={rec_id} re_encode={re_encodes}")
-
-        # Take a background snapshot right after FFmpeg starts — switch progress msg to photo
-        async def _try_initial_snapshot():
-            await asyncio.sleep(10)   # give FFmpeg a moment to buffer first segment
-            if rec_id not in active_recs.get(user_id, {}):
-                return
-            snap_path = join(save_dir, "live_preview.jpg")
-            ok = await take_stream_snapshot(effective_url, snap_path, is_hls)
-            if not ok or rec_id not in active_recs.get(user_id, {}):
-                return
-            try:
-                kb   = _rec_progress_kb(user_id, rec_id)
-                text = _build_progress_text()
-                await client.edit_message_media(
-                    chat_id, msg.id,
-                    InputMediaPhoto(snap_path, caption=text),
-                    reply_markup=kb,
-                )
-                active_recs[user_id][rec_id]["is_photo_msg"] = True
-                active_recs[user_id][rec_id]["snap_path"]    = snap_path
-            except Exception as e:
-                LOG.debug(f"Initial snapshot switch failed: {e}")
-
-        asyncio.create_task(_try_initial_snapshot())
-
-        _stdout, stderr = await ffmpeg_process.communicate()
-        retcode = ffmpeg_process.returncode
-        rec_entry.pop("ffmpeg_pid", None)
-        pt = rec_entry.pop("progress_task", None)
-        if pt:
-            pt.cancel()
-
-        was_cancelled = (user_id, rec_id) in cancelled_recs
-        if retcode != 0 and not was_cancelled:
-            err_tail = stderr.decode(errors="ignore").strip()
-            if len(err_tail) > 1500:
-                err_tail = "..." + err_tail[-1500:]
-            if not err_tail:
-                err_tail = f"FFmpeg exited with code {retcode} (no stderr)."
-            raise Exception(f"FFmpeg error:\n{err_tail}")
-
-        if not os.path.exists(video_path) or os.path.getsize(video_path) == 0:
-            if was_cancelled:
-                await msg.edit_text("Recording cancelled — no video recorded.")
-                return
-            raise Exception("No video file created or file is empty.")
-
-        await msg.edit_text("🖼 Generating thumbnail...")
-        dur = await get_duration_ffmpeg(video_path) or time_to_seconds(timestamp)
-
-        fixed = join(save_dir, f"fixed_{mkv_filename}")
-        rc, _o, err = await runcmd(
-            f'ffmpeg -hide_banner -loglevel error -nostats -y '
-            f'-i {shlex.quote(video_path)} -map 0 -c copy '
-            f'-metadata creation_time="{time.strftime("%Y-%m-%dT%H:%M:%S")}" '
-            f'{shlex.quote(fixed)}'
-        )
-        if rc == 0:
-            os.replace(fixed, video_path)
-        else:
-            LOG.warning(f"Metadata fix failed: {err}")
-
-        rand_sec   = random.randint(5, max(dur - 5, 6))
-        thumb_path = join(save_dir, "thumb.jpg")
-        await runcmd(
-            f'ffmpeg -hide_banner -loglevel error -nostats -y '
-            f'-ss {rand_sec} -i {shlex.quote(video_path)} '
-            f'-vframes 1 -q:v 2 {shlex.quote(thumb_path)}'
-        )
-        thumb_ok = os.path.exists(thumb_path)
-
-        retention_note = f"_Auto-deleted from server after {_retention_label()}._"
-        q_str = f"{setup['quality']}p" if setup["quality"] != "original" else "Original"
-        asp_label = {
-            "none": "None", "21:9": "21:9", "16:9": "16:9", "4:5": "4:5",
-            "bars": "16:9 Bars", "zoom": "16:9 Zoom", "1280x720": "1280×720",
-        }.get(setup["aspect"], setup["aspect"])
-        audio_note = "All tracks" if setup["audio_track"] == 0 else f"Track {setup['audio_track']}"
-        wm_note    = (f"💧 Watermark: `{setup['watermark_pos'].replace('_',' ').title()}`"
-                      if setup["watermark_on"] else "")
-
-        if was_cancelled:
-            caption = (f"🎬 **{BRAND_TITLE}**\n\n"
-                       f"Duration: `{TimeFormatter(dur * 1000)}`\nFormat: `MKV (partial)`\n"
-                       f"_Recording was cancelled — partial file attached._\n{retention_note}")
-        else:
-            caption = (f"🎬 **{BRAND_TITLE}**\n\n"
-                       f"Duration: `{TimeFormatter(dur * 1000)}`\n"
-                       f"Quality: `{q_str}` | Aspect: `{asp_label}`\n"
-                       f"Audio: `{audio_note}`\n"
-                       + (f"{wm_note}\n" if wm_note else "")
-                       + f"{retention_note}")
-
-        send_target  = orig_msg or (query.message if query else msg)
-        size_bytes   = os.path.getsize(video_path)
-        size_str     = (f"{size_bytes / (1024**3):.2f} GB" if size_bytes >= 1024**3
-                        else f"{size_bytes / (1024**2):.1f} MB")
-
-        # ── Auto-compress if recording is 800 MB – 1 GB ─────────────────────
-        # Runs silently before showing upload buttons. All audio tracks (multi-
-        # language) are preserved. Skipped for cancelled/partial recordings.
-        if not was_cancelled:
-            video_path = await auto_compress_large_video(
-                video_path, save_dir, dur, msg, user_id
-            )
-            # Recalculate size in case compression ran
-            size_bytes = os.path.getsize(video_path)
-            size_str   = (f"{size_bytes / (1024**3):.2f} GB" if size_bytes >= 1024**3
-                          else f"{size_bytes / (1024**2):.1f} MB")
-            mkv_filename = os.path.basename(video_path)
-            # Regenerate thumbnail from potentially new file
-            thumb_path = join(save_dir, "thumb.jpg")
-            rand_sec   = random.randint(5, max(dur - 5, 6))
-            await runcmd(
-                f'ffmpeg -hide_banner -loglevel error -nostats -y '
-                f'-ss {rand_sec} -i {shlex.quote(video_path)} '
-                f'-vframes 1 -q:v 2 {shlex.quote(thumb_path)}'
-            )
-            thumb_ok   = os.path.exists(thumb_path)
-        # ────────────────────────────────────────────────────────────────────
-
-        partial_note = "\n_⚠️ Partial recording (cancelled)_" if was_cancelled else ""
-
-        # Auto-upload directly to Telegram — no button prompt
         try:
-            await msg.edit_text(
-                f"🎉 **Recording Successfully Completed!**\n\n"
-                f"🎬 File Name: `{mkv_filename}`\n"
-                f"📦 Size: `{size_str}`\n"
-                f"⏱ Duration: `{TimeFormatter(dur * 1000)}`"
-                f"{partial_note}\n\n"
-                "⬆️ Uploading to Telegram…"
+            _, stderr = await asyncio.wait_for(proc.communicate(), timeout=15)
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.wait()
+            return "timeout", "The FFmpeg test did not complete within 15 seconds."
+    except OSError as exc:
+        return "error", str(exc)
+
+    error_text = stderr.decode(errors="replace").strip()
+    if proc.returncode == 0:
+        return "accepted", "FFmpeg ne option accept kiya."
+    if "live_start_index" in error_text.lower():
+        return "unsupported", error_text[-500:]
+    return "failed", error_text[-500:] or f"FFmpeg exit code {proc.returncode}."
+
+
+def get_epg(channel_id, offset=0):
+    url = f"https://jiotvapi.cdn.jio.com/apis/v1.3/getepg/get?offset={offset}&channel_id={channel_id}&langId=6"
+    headers = {"user-agent": "okhttp/4.12.13", "Accept-Encoding": "gzip"}
+    resp = requests.get(url, headers=headers, timeout=10)
+    if resp.status_code == 200:
+        try:
+            data = gzip.decompress(resp.content)
+            return json.loads(data)
+        except Exception:
+            try:
+                return resp.json()
+            except Exception:
+                return None
+    return None
+
+def parse_time(time_str):
+    time_str = time_str.strip().upper()
+    for fmt in ["%I:%M%p", "%I:%M %p", "%H:%M"]:
+        try:
+            t = datetime.strptime(time_str, fmt)
+            return t.hour, t.minute
+        except ValueError:
+            continue
+    return None, None
+
+
+def _load_scheduled_recordings():
+    global SCHEDULED_RECORDINGS
+    try:
+        if not os.path.exists(SCHEDULED_RECORDINGS_FILE):
+            SCHEDULED_RECORDINGS = []
+            return
+        with open(SCHEDULED_RECORDINGS_FILE, "r", encoding="utf-8") as handle:
+            data = json.load(handle)
+        SCHEDULED_RECORDINGS = data if isinstance(data, list) else []
+    except (OSError, ValueError, TypeError):
+        logger.exception("Scheduled recordings could not be loaded.")
+        SCHEDULED_RECORDINGS = []
+
+
+def _save_scheduled_recordings():
+    temporary = f"{SCHEDULED_RECORDINGS_FILE}.{_secrets.token_hex(6)}.tmp"
+    try:
+        with open(temporary, "w", encoding="utf-8") as handle:
+            json.dump(SCHEDULED_RECORDINGS, handle, indent=2)
+        os.replace(temporary, SCHEDULED_RECORDINGS_FILE)
+    except OSError:
+        try:
+            os.remove(temporary)
+        except OSError:
+            pass
+        logger.exception("Scheduled recordings could not be saved.")
+
+
+def _schedule_datetime(value: str) -> datetime:
+    value = " ".join(str(value).strip().split())
+    try:
+        parsed = datetime.fromisoformat(value)
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=IST)
+        return parsed.astimezone(IST)
+    except ValueError:
+        pass
+    for fmt in (
+        "%d/%m/%Y %I:%M%p",
+        "%d/%m/%Y %I:%M %p",
+        "%d/%m/%Y %H:%M",
+    ):
+        try:
+            return datetime.strptime(value.upper(), fmt).replace(tzinfo=IST)
+        except ValueError:
+            continue
+    raise ValueError("Date/time format must be DD/MM/YYYY HH:MMAM.")
+
+
+def _schedule_display_datetime(value: str) -> str:
+    return _schedule_datetime(value).strftime("%d/%m/%Y %I:%M%p")
+
+
+class _ScheduledStatusMessage:
+    """Small Message-compatible proxy used when a schedule survives a restart."""
+
+    def __init__(self, bot, chat_id: int, message_id: int):
+        self._bot = bot
+        self.chat_id = chat_id
+        self.message_id = message_id
+        self.chat = SimpleNamespace(id=chat_id)
+
+    async def edit_text(self, text, **kwargs):
+        return await self._bot.edit_message_text(
+            chat_id=self.chat_id,
+            message_id=self.message_id,
+            text=text,
+            **kwargs,
+        )
+
+
+def _scheduled_recording_text(item: dict) -> str:
+    source = {
+        "airtel": "Airtel",
+        "sunnxt": "Sunnxt",
+    }.get(item.get("source"), "DishTV")
+    return (
+        "✅ *Recording Scheduled*\n\n"
+        f"📡 Source: *{source}*\n"
+        f"📺 Channel: *{item.get('channel_name', 'Unknown')}*\n\n"
+        f"🟢 Start: `{_schedule_display_datetime(item['start'])}`\n"
+        f"🔴 End: `{_schedule_display_datetime(item['end'])}`\n"
+        f"⏱ Duration: `{_fmt_time(item.get('duration_seconds', 0))}`\n\n"
+        f"🆔 `{item.get('id', '')}`"
+    )
+
+
+def _schedule_raw_arguments(update: Update) -> str:
+    text = (getattr(update.effective_message, "text", "") or "").strip()
+    return re.sub(r"^/schedule(?:@\w+)?\s*", "", text, flags=re.IGNORECASE).strip()
+
+
+def _parse_schedule_arguments(update: Update) -> tuple[str, str, str, str]:
+    raw = _schedule_raw_arguments(update)
+    source = "dishtv"
+    source_match = re.search(
+        r"(?<!\S)-(dishtv|airtel|sunnxt)(?=\s|$)", raw, re.IGNORECASE
+    )
+    if source_match:
+        source = source_match.group(1).lower()
+        raw = (raw[:source_match.start()] + raw[source_match.end():]).strip()
+
+    date_part = r"\d{1,2}/\d{1,2}/\d{4}\s+\d{1,2}:\d{2}\s*[APap][Mm]"
+    match = re.fullmatch(
+        rf"-c\s+(?:\"([^\"]+)\"|(.+?))\s+-t\s+"
+        rf"({date_part})\s*-\s*({date_part})",
+        raw,
+        flags=re.IGNORECASE,
+    )
+    if not match:
+        raise ValueError(
+            "Usage: `/schedule [-dishtv|-airtel|-sunnxt] -c \"Channel Name\" "
+            "-t DD/MM/YYYY HH:MMAM - DD/MM/YYYY HH:MMPM`"
+        )
+    channel_name = (match.group(1) or match.group(2) or "").strip()
+    return source, channel_name, match.group(3).strip(), match.group(4).strip()
+
+
+async def _run_scheduled_recording(application, item: dict):
+    schedule_id = item["id"]
+    status_message = None
+    try:
+        start = _schedule_datetime(item["start"])
+        end = _schedule_datetime(item["end"])
+        now = datetime.now(IST)
+        if now < start:
+            await asyncio.sleep((start - now).total_seconds())
+        now = datetime.now(IST)
+        if now >= end:
+            item["status"] = "expired"
+            _save_scheduled_recordings()
+            return
+
+        # Respect the same global processing limit as interactive recordings.
+        # Owner/admin schedules are allowed to bypass that limit, matching the
+        # existing command behavior.
+        if not (is_owner(int(item["user_id"])) or is_admin(int(item["user_id"]))):
+            while _active_processes >= MAX_PROCESSES:
+                if datetime.now(IST) >= end:
+                    item["status"] = "expired"
+                    _save_scheduled_recordings()
+                    return
+                item["status"] = "waiting_for_slot"
+                _save_scheduled_recordings()
+                await asyncio.sleep(10)
+
+        item["status"] = "running"
+        item["started_at"] = now.isoformat()
+        _save_scheduled_recordings()
+
+        status_message = _ScheduledStatusMessage(
+            application.bot, int(item["chat_id"]), int(item["message_id"])
+        )
+        try:
+            await status_message.edit_text(
+                "⏺ *Scheduled recording is starting…*\n\n"
+                f"📺 {item['channel_name']}\n"
+                f"📡 {item.get('source', 'dishtv').title()}",
+                parse_mode=ParseMode.MARKDOWN,
             )
         except Exception:
-            pass
+            status_message = await application.bot.send_message(
+                chat_id=int(item["chat_id"]),
+                text=(
+                    "⏺ Scheduled recording is starting…\n\n"
+                    f"📺 {item['channel_name']}"
+                ),
+            )
+            item["message_id"] = status_message.message_id
+            _save_scheduled_recordings()
 
-        upload_start = time.time()
-        await split_and_send_video(
-            send_target, video_path, caption, dur,
-            thumb_path=thumb_path if thumb_ok else None,
-            status_msg=msg,
-            progress=progress_for_pyrogram,
-            progress_args=(send_target, upload_start, msg, save_dir, was_cancelled),
-            _uid=user_id, _chat_id=send_target.chat.id,
+        channel = find_channel(
+            item["channel_name"], force_refresh=True, source=item["source"]
         )
+        if not channel:
+            raise RuntimeError(
+                f"{item['source'].title()} channel `{item['channel_name']}` "
+                "was not found in the playlist."
+            )
 
-        if setup.get("auto_mode") and not was_cancelled and dur > 120:
+        if item.get("source") in {"airtel", "sunnxt"}:
+            await status_message.edit_text(
+                _ott_probe_text(item["source"]),
+                parse_mode=ParseMode.MARKDOWN,
+            )
+
+        remaining_seconds = max(1, int((end - datetime.now(IST)).total_seconds()))
+        user = SimpleNamespace(
+            id=int(item["user_id"]),
+            username=item.get("username") or None,
+            first_name=item.get("first_name") or "User",
+        )
+        chat = SimpleNamespace(id=int(item["chat_id"]))
+        fake_message = status_message
+        fake_update = SimpleNamespace(
+            effective_user=user,
+            effective_chat=chat,
+            effective_message=fake_message,
+            message=fake_message,
+        )
+        fake_context = SimpleNamespace(bot=application.bot, user_data={})
+        await run_recording_job(
+            fake_update,
+            fake_context,
+            channel,
+            remaining_seconds,
+            f"{_schedule_display_datetime(item['start'])} - "
+            f"{_schedule_display_datetime(item['end'])}",
+            "16:9",
+            "576p",
+            0,
+            "multi",
+            [],
+            status_message,
+            past_range=None,
+        )
+        item["status"] = "completed"
+        item["completed_at"] = datetime.now(IST).isoformat()
+    except asyncio.CancelledError:
+        item["status"] = "cancelled"
+        raise
+    except Exception as exc:
+        logger.exception("Scheduled recording %s failed.", schedule_id)
+        item["status"] = "failed"
+        item["error"] = str(exc)[:900]
+        if status_message:
             try:
-                await msg.edit_text("✂️ Auto mode: generating last 2-minute clip…")
+                await status_message.edit_text(
+                    f"❌ Scheduled recording failed\n\n{str(exc)[:900]}"
+                )
             except Exception:
                 pass
-            clip_dir  = join(save_dir, "auto_clips")
-            os.makedirs(clip_dir, exist_ok=True)
-            last_clip = join(clip_dir, "last_2min.mkv")
-            last_start = max(0, dur - 120)
-            await runcmd(
-                f'ffmpeg -hide_banner -loglevel error -nostats -y '
-                f'-ss {last_start} -to {dur} -i {shlex.quote(video_path)} '
-                f'-c copy {shlex.quote(last_clip)}'
-            )
-            if os.path.exists(last_clip) and os.path.getsize(last_clip) > 0:
-                try:
-                    await send_target.reply_video(
-                        video=last_clip,
-                        caption=(f"🎬 **{BRAND_TITLE}** — ⏭ Last 2 minute"),
-                        supports_streaming=True,
-                    )
-                except Exception as ce:
-                    LOG.warning(f"Auto clip upload failed: {ce}")
-
-        schedule_retention_cleanup(save_dir)
-
-    except Exception as e:
-        LOG.error(f"do_record error uid={user_id}: {e}")
-        try:
-            if (user_id, rec_id) not in cancelled_recs:
-                if is_owner(user_id) or is_admin(user_id):
-                    # Admins/owners see full technical error
-                    err_text = str(e)
-                    if len(err_text) > 3500:
-                        err_text = "...[truncated]...\n" + err_text[-3500:]
-                    await msg.edit_text(f"**Recording failed.**\n\n`{err_text}`")
-                else:
-                    # Normal users see a clean message — no FFmpeg internals
-                    await msg.edit_text(
-                        "❌ **Recording failed.**\n\n"
-                        "Stream could not be recorded. Please check the link and try again.\n"
-                        "Use /contact if the problem persists."
-                    )
-            if (user_id, rec_id) not in cancelled_recs and save_dir and os.path.exists(save_dir):
-                _safe_rmtree(save_dir)
-        except Exception as exc:
-            LOG.error(f"Failed to edit error message: {exc}")
     finally:
-        if user_id in active_recs:
-            active_recs[user_id].pop(rec_id, None)
-            if not active_recs[user_id]:
-                del active_recs[user_id]
-        cancelled_recs.discard((user_id, rec_id))
+        item["finished_at"] = datetime.now(IST).isoformat()
+        _save_scheduled_recordings()
+        SCHEDULE_RUNTIME_TASKS.pop(schedule_id, None)
 
-# ---------------------------------------------------------------------------
-# OTT downloader helpers
-# ---------------------------------------------------------------------------
 
-_NETSCAPE_HEADER       = "# Netscape HTTP Cookie File"
-_MAX_COOKIE_FILE_BYTES = 2 * 1024 * 1024
-_COOKIE_PROMPT_TTL_SEC = 5 * 60
+async def _scheduled_recording_manager(application):
+    while True:
+        now = datetime.now(IST)
+        for item in list(SCHEDULED_RECORDINGS):
+            if item.get("status") not in {"pending", "running"}:
+                continue
+            try:
+                end = _schedule_datetime(item["end"])
+            except (KeyError, ValueError):
+                item["status"] = "failed"
+                item["error"] = "Stored schedule has an invalid date/time."
+                _save_scheduled_recordings()
+                continue
+            if now >= end and item["id"] not in SCHEDULE_RUNTIME_TASKS:
+                item["status"] = "expired"
+                _save_scheduled_recordings()
+                continue
+            if item["id"] not in SCHEDULE_RUNTIME_TASKS:
+                task = asyncio.create_task(_run_scheduled_recording(application, item))
+                SCHEDULE_RUNTIME_TASKS[item["id"]] = task
+        await asyncio.sleep(2)
+
+
+_load_scheduled_recordings()
+
+
+async def schedule_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Persist a future recording window and let the scheduler run it."""
+    uid = update.effective_user.id
+    if BOT_MODE != "public" and not (
+        is_owner(uid) or is_admin(uid) or is_premium(uid) or is_verified(uid)
+    ):
+        await update.message.reply_text(
+            "🔐 *Verification is required to access this command.*\n\n"
+            "Command: `/verify`",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        return
+    try:
+        source, channel_name, start_raw, end_raw = _parse_schedule_arguments(update)
+        start = _schedule_datetime(start_raw)
+        end = _schedule_datetime(end_raw)
+    except ValueError as exc:
+        await update.message.reply_text(
+            f"❌ {exc}\n\n"
+            "Example:\n"
+            "`/schedule -sunnxt -c \"Sun TV HD\" -t "
+            "09/09/2026 10:29AM - 09/09/2026 11:16AM`",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        return
+
+    now = datetime.now(IST)
+    if start <= now:
+        await update.message.reply_text(
+            "❌ The start date/time must be in the future.",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        return
+    if end <= start:
+        await update.message.reply_text(
+            "❌ The end date/time must be after the start date/time.",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        return
+
+    duration_seconds = int((end - start).total_seconds())
+    if duration_seconds > REC_LIMIT_SECONDS:
+        uid = update.effective_user.id
+        if not (is_owner(uid) or is_premium(uid)):
+            await update.message.reply_text(
+                f"❌ Scheduled duration limit exceeded.\n\n"
+                f"Maximum: *{REC_LIMIT_SECONDS // 60} minutes*",
+                parse_mode=ParseMode.MARKDOWN,
+            )
+            return
+
+    try:
+        channel = find_channel(channel_name, force_refresh=True, source=source)
+    except requests.RequestException:
+        channel = None
+    if not channel:
+        provider = {
+            "airtel": "Airtel Next",
+            "sunnxt": "Sunnxt Next",
+        }.get(source, "DishTV Next")
+        await update.message.reply_text(
+            f"❌ {provider} channel *{channel_name}* not found.",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        return
+
+    schedule_id = _secrets.token_hex(6)
+    item = {
+        "id": schedule_id,
+        "user_id": update.effective_user.id,
+        "username": update.effective_user.username or "",
+        "first_name": update.effective_user.first_name or "User",
+        "chat_id": update.effective_chat.id,
+        "message_id": 0,
+        "source": source,
+        "channel_name": channel["channel_name"],
+        "start": start.isoformat(),
+        "end": end.isoformat(),
+        "duration_seconds": duration_seconds,
+        "status": "pending",
+        "created_at": now.isoformat(),
+    }
+    SCHEDULED_RECORDINGS.append(item)
+    _save_scheduled_recordings()
+    status = await update.message.reply_text(
+        _scheduled_recording_text(item),
+        parse_mode=ParseMode.MARKDOWN,
+    )
+    item["message_id"] = status.message_id
+    _save_scheduled_recordings()
+
+
+def _requested_range_datetimes(time_range):
+    """Resolve a parsed HH:MM range against today's local date."""
+    now = datetime.now(IST)
+    start_h, start_m, end_h, end_m = time_range
+    start = now.replace(hour=start_h, minute=start_m, second=0, microsecond=0)
+    end = now.replace(hour=end_h, minute=end_m, second=0, microsecond=0)
+    if end <= start:
+        end += timedelta(days=1)
+    return start, end, now
+
+
+def find_program_in_epg(channel_id, start_h, start_m, end_h, end_m):
+    for offset in [0, -1, 1]:
+        epg = get_epg(channel_id, offset)
+        if not epg:
+            continue
+        for program in epg.get("epg", []):
+            try:
+                start_ts = int(program.get("startEpoch", 0))
+                end_ts = int(program.get("endEpoch", 0))
+                p_start = datetime.fromtimestamp(start_ts, tz=IST)
+                p_end = datetime.fromtimestamp(end_ts, tz=IST)
+                if p_start.hour == start_h and p_start.minute == start_m:
+                    return program, p_start, p_end
+                if p_end.hour == end_h and p_end.minute == end_m:
+                    return program, p_start, p_end
+            except Exception:
+                continue
+    return None, None, None
+
+def jio_headers_from_creds(creds):
+    return {
+        "appname": "RJIL_JioTV",
+        "os": "android",
+        "devicetype": "phone",
+        "content-type": "application/json",
+        "user-agent": "okhttp/3.14.9"
+    }
+
+def send_jio_otp_api(mobile):
+    url = "https://jiotvapi.media.jio.com/userservice/apis/v1/loginotp/send"
+    headers = {
+        "appname": "RJIL_JioTV",
+        "os": "android",
+        "devicetype": "phone",
+        "content-type": "application/json",
+        "user-agent": "okhttp/3.14.9"
+    }
+    payload = {"number": base64.b64encode(f"+91{mobile}".encode()).decode()}
+    resp = requests.post(url, json=payload, headers=headers, timeout=10)
+    if resp.status_code == 204:
+        return {"status": "success", "message": "OTP sent successfully"}
+    try:
+        data = resp.json()
+        return {"status": "error", "message": data.get("message", f"Error code {resp.status_code}")}
+    except Exception:
+        return {"status": "error", "message": f"Unknown error: {resp.status_code}"}
+
+def verify_jio_otp_api(mobile, otp):
+    url = "https://jiotvapi.media.jio.com/userservice/apis/v1/loginotp/verify"
+    headers = {
+        "appname": "RJIL_JioTV",
+        "os": "android",
+        "devicetype": "phone",
+        "content-type": "application/json",
+        "user-agent": "okhttp/3.14.9"
+    }
+    payload = {
+        "number": base64.b64encode(f"+91{mobile}".encode()).decode(),
+        "otp": otp,
+        "deviceInfo": {
+            "consumptionDeviceName": "RMX1945",
+            "info": {
+                "type": "android",
+                "platform": {"name": "RMX1945"},
+                "androidId": "tsjiotvbot123456"
+            }
+        }
+    }
+    resp = requests.post(url, json=payload, headers=headers, timeout=10)
+    try:
+        data = resp.json()
+    except Exception:
+        return {"status": "error", "message": f"Parse error: {resp.status_code}"}
+    if data.get("ssoToken"):
+        save_credentials(data, mobile)
+        return {"status": "success", "message": "Login successful!"}
+    msg = data.get("message", "")
+    if not msg and "errors" in data and data["errors"]:
+        msg = data["errors"][-1].get("message", "")
+    return {"status": "error", "message": msg or f"Verify failed: {resp.status_code}"}
+
+# ── Stream URL builders ────────────────────────
+
+def get_stream_url(channel_id, creds=None):
+    """Return (stream_url, cookie, user_agent) for a channel from the M3U playlist."""
+    channels = get_channels()
+    for ch in channels:
+        if str(ch["channel_id"]) == str(channel_id):
+            return ch.get("stream_url"), ch.get("cookie", ""), ch.get("user_agent", "")
+    return None, "", ""
+
+
+def _playback_headers(creds, channel_id):
+    user = creds.get("sessionAttributes", {}).get("user", {})
+    subscriber_id = user.get("subscriberId", "")
+    return {
+        "Host": "jiotvapi.media.jio.com",
+        "Content-Type": "application/x-www-form-urlencoded",
+        "appkey": "NzNiMDhlYzQyNjJm",
+        "channel_id": str(channel_id),
+        "userid": subscriber_id,
+        "crmid": subscriber_id,
+        "deviceId": creds.get("deviceId", ""),
+        "devicetype": "phone",
+        "isott": "true",
+        "languageId": "6",
+        "lbcookie": "1",
+        "os": "android",
+        "dm": "Xiaomi 22101316UP",
+        "osversion": "14",
+        "accesstoken": creds.get("authToken", ""),
+        "subscriberid": subscriber_id,
+        "uniqueId": user.get("unique", ""),
+        "usergroup": "tvYR7NSNn7rymo3F",
+        "User-Agent": "okhttp/4.12.13",
+        "versionCode": "452",
+    }
+
+
+def _playback_value(result, *names):
+    """Find a playback field in the API's occasionally varying response shape."""
+    if isinstance(result, dict):
+        for name in names:
+            value = result.get(name)
+            if isinstance(value, str) and value:
+                return value
+        for value in result.values():
+            found = _playback_value(value, *names)
+            if found:
+                return found
+    return ""
+
+
+def get_authenticated_live_stream(channel):
+    """Get a fresh signed live stream using the logged-in JioTV session."""
+    creds = load_credentials()
+    channel_id = channel.get("channel_id")
+    if not creds or not creds.get("authToken") or not channel_id:
+        return None
+
+    cache_key = str(channel_id)
+    cached = _authenticated_stream_cache.get(cache_key)
+    if cached and time.time() - cached["created_at"] < _AUTHENTICATED_STREAM_CACHE_TTL:
+        return dict(cached["stream"])
+
+    user = creds.get("sessionAttributes", {}).get("user", {})
+    payload = (
+        "stream_type=Live"
+        f"&channel_id={channel_id}"
+        "&programId=0&showtime=000000&srno=0&begin=&end="
+    )
+    try:
+        response = requests.post(
+            "https://jiotvapi.media.jio.com/playback/apis/v1/geturl?langId=6",
+            data=payload,
+            headers=_playback_headers(creds, channel_id),
+            timeout=12,
+        )
+        response.raise_for_status()
+        data = response.json()
+        if not isinstance(data, dict):
+            return None
+        if str(data.get("code", 200)) not in ("200", "None"):
+            return None
+        result = data.get("result", data)
+        stream_url = (
+            result if isinstance(result, str)
+            else _playback_value(
+                result, "url", "streamUrl", "stream_url", "playbackUrl",
+                "playback_url", "manifestUrl", "manifest_url",
+            )
+        )
+        if not stream_url:
+            return None
+
+        cookie = (
+            _playback_value(result, "cookie", "cookies", "httpCookie")
+            or "; ".join(
+                f"{key}={value}" for key, value in response.cookies.get_dict().items()
+            )
+        )
+        user_agent = _playback_value(result, "userAgent", "user_agent") or channel.get(
+            "user_agent", "JioTV.Plus/2.3.1_2041 (Linux;Android 14) AndroidXMedia3/1.4.0"
+        )
+        license_key = _playback_value(
+            result, "licenseKey", "license_key", "licenseUrl", "license_url"
+        )
+        stream = {
+            "stream_url": stream_url,
+            "cookie": cookie,
+            "user_agent": user_agent,
+            "license_key": license_key or channel.get("license_key", ""),
+        }
+        _authenticated_stream_cache[cache_key] = {
+            "created_at": time.time(),
+            "stream": stream,
+        }
+        return dict(stream)
+    except (requests.RequestException, ValueError, TypeError):
+        return None
+
+
+def get_catchup_url(channel_id, srno, begin, end, creds):
+    access_token = creds.get("authToken", "")
+    crm = creds.get("sessionAttributes", {}).get("user", {}).get("subscriberId", "")
+    unique_id = creds.get("sessionAttributes", {}).get("user", {}).get("unique", "")
+    device_id = creds.get("deviceId", "")
+    post_data = f"stream_type=Catchup&channel_id={channel_id}&programId={srno}&showtime=000000&srno={srno}&begin={begin}&end={end}"
+    headers = _playback_headers(creds, channel_id)
+    headers["srno"] = str(srno)
+    resp = requests.post(
+        "https://jiotvapi.media.jio.com/playback/apis/v1/geturl?langId=6",
+        data=post_data, headers=headers, timeout=10
+    )
+    data = resp.json()
+    if data.get("code") == 200:
+        return data.get("result")
+    return None
+
+# ── Role decorators ────────────────────────────
+
+def owner_only(func):
+    async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        uid = update.effective_user.id
+        if not is_owner(uid):
+            await update.message.reply_text("❌ Only the owner can use this command.")
+            return
+        return await func(update, context)
+    return wrapper
+
+def owner_admin_only(func):
+    async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        uid = update.effective_user.id
+        if not is_owner(uid) and not is_admin(uid):
+            await update.message.reply_text("❌ Only the owner or an admin can use this command.")
+            return
+        return await func(update, context)
+    return wrapper
+
+def require_login(func):
+    async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not load_credentials():
+            await update.message.reply_text(
+                "❌ JioTV login is not configured.\nFirst use `/login <mobile>` and verify the OTP.",
+                parse_mode=ParseMode.MARKDOWN
+            )
+            return
+        return await func(update, context)
+    return wrapper
+
+def require_verification(func):
+    async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        uid = update.effective_user.id
+        if BOT_MODE == "public":
+            return await func(update, context)
+        if is_owner(uid) or is_admin(uid) or is_premium(uid):
+            return await func(update, context)
+        if not is_verified(uid):
+            await update.message.reply_text(
+                "🔐 *Verification is required to access this command.*\n\n"
+                "Command: `/verify`",
+                parse_mode=ParseMode.MARKDOWN
+            )
+            return
+        return await func(update, context)
+    return wrapper
 
 
 def _user_cookies_path(user_id: int) -> str:
-    return join(COOKIES_DIRECTORY, f"{user_id}.txt")
+    return os.path.join(COOKIES_FOLDER, f"{user_id}.txt")
 
 
 def _user_has_cookies(user_id: int) -> bool:
     path = _user_cookies_path(user_id)
-    return os.path.exists(path) and os.path.getsize(path) > 0
+    return os.path.isfile(path) and os.path.getsize(path) > 0
 
 
 def _cookies_summary(user_id: int) -> str:
+    """Return safe cookie metadata without exposing cookie values."""
     path = _user_cookies_path(user_id)
-    if not os.path.exists(path):
-        return "No cookies on file."
+    if not os.path.isfile(path):
+        return "❌ No cookies stored."
     try:
-        size  = os.path.getsize(path)
-        mtime = datetime.fromtimestamp(os.path.getmtime(path), tz=pytz.timezone(TIMEZONE))
-        with open(path, "r", encoding="utf-8", errors="ignore") as f:
-            lines = [ln for ln in f if ln.strip() and not ln.startswith("#")]
-        hosts = sorted({ln.split("\t", 1)[0].lstrip(".") for ln in lines if "\t" in ln})
-        host_preview = ", ".join(hosts[:6]) + ("…" if len(hosts) > 6 else "")
-        return (f"Cookies are set.\n• Cookie lines: `{len(lines)}`\n"
-                f"• File size: `{size} bytes`\n• Hosts: `{host_preview or 'unknown'}`\n"
-                f"• Uploaded: `{mtime.strftime('%Y-%m-%d %H:%M %Z')}`")
-    except Exception as e:
-        return f"Cookies are set, but couldn't be read ({e})."
-
-
-def _fmt_bytes(n) -> str:
-    if n is None: return "?"
-    for unit in ("B", "KB", "MB", "GB", "TB"):
-        if n < 1024: return f"{n:.1f} {unit}"
-        n /= 1024
-    return f"{n:.1f} PB"
-
-
-def _fmt_eta(s) -> str:
-    if s is None or s < 0: return "?"
-    s = int(s)
-    h, rem = divmod(s, 3600); m, sec = divmod(rem, 60)
-    return f"{h}:{m:02d}:{sec:02d}" if h else f"{m}:{sec:02d}"
-
-
-def _make_encode_progress_text(cmd_name: str, pct: float,
-                                size_bytes: int = 0, total_bytes: int = 0,
-                                speed_x: float = 0.0, eta_sec: float = 0.0) -> str:
-    """Unified ffmpeg-encoding progress block used by all commands."""
-    bar_len = 20
-    filled  = max(0, min(bar_len, int(round(pct / 100 * bar_len))))
-    bar     = "●" * filled + "○" * (bar_len - filled)
-    size_mb = size_bytes / (1024 * 1024)
-    tot_mb  = total_bytes / (1024 * 1024) if total_bytes else 0
-    size_str = f"`{size_mb:.1f} MB`" + (f" / `{tot_mb:.1f} MB`" if tot_mb else "")
-    spd_str  = f"`{speed_x:.2f}x`" if speed_x else "`?`"
-    eta_str  = _fmt_eta(int(eta_sec)) if eta_sec else "`?`"
-    if not eta_str.startswith("`"):
-        eta_str = f"`{eta_str}`"
-    return (f"📡 **{cmd_name}**\n\n"
-            f"Status: `encoding`\n"
-            f"`{bar}` `{pct:5.1f}%`\n"
-            f"💾 Size: {size_str}\n"
-            f"⚡ Speed: {spd_str}\n"
-            f"⏳ ETA: {eta_str}")
-
-
-def _upload_dest_keyboard(uid: int) -> InlineKeyboardMarkup:
-    """Choice buttons shown before upload: Telegram only."""
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📤 Telegram", callback_data=f"upl_ch:{uid}:tg")],
-        [InlineKeyboardButton("❌ Cancel",    callback_data=f"upl_ch:{uid}:cancel")],
-    ])
-
-
-async def _await_upload_choice(uid: int, status_msg, info_text: str = "") -> str:
-    """Always upload to Telegram automatically — no prompt shown."""
-    return "tg"
-
-
-def _upload_task_id(seed) -> str:
-    """Derive a short 8-char hex task id from any hashable seed (path, id, etc)."""
-    return hashlib.md5(str(seed).encode()).hexdigest()[:8]
-
-
-def _fmt_upload_progress_box(title: str, current: int, total: int,
-                              speed: float, eta_sec: int, task_id: str,
-                              compact: bool = False) -> str:
-    """Render the box-style upload progress card shared by Telegram/Drive uploads.
-
-    compact=True renders the shorter Drive-style card (no Speed/ETA rows,
-    whole-number percentage) matching the ☁️ Drive-only upload flow.
-    """
-    pct     = (current * 100 / total) if total else 0.0
-    bar_len = 10
-    filled  = max(0, min(bar_len, int(round(pct / 100 * bar_len))))
-    bar     = "⬢" * filled + "⬡" * (bar_len - filled)
-    size_str = f"{current/(1024**3):.1f} / {total/(1024**3):.1f} GB" if total >= 1024**3 else \
-               f"{current/(1024**2):.1f} / {total/(1024**2):.1f} MB"
-    if compact:
-        return (
-            f"🚀 {title}\n\n"
-            f"┌ 📊 Upload Progress\n"
-            f"├ [{bar}] {pct:.0f}%\n"
-            f"├ 💾 Size : {size_str}\n"
-            f"└ 🆔 Task : {task_id}"
-        )
-    speed_str = f"{speed/(1024*1024):.1f} MB/s" if speed and speed > 0 else "-- MB/s"
-    eta_str   = TimeFormatter(eta_sec * 1000) if eta_sec and eta_sec > 0 else "--:--"
-    return (
-        f"🚀 {title}\n\n"
-        f"┌ 📊 Upload Progress\n"
-        f"├ [{bar}] {pct:.1f}%\n"
-        f"├ 💾 Size  : {size_str}\n"
-        f"├ ⚡ Speed : {speed_str}\n"
-        f"├ ⏳ ETA   : {eta_str}\n"
-        f"└ 🆔 Task  : {task_id}"
-    )
-
-
-def _ott_progress_text(state: dict) -> str:
-    pct     = state.get("percent", 0.0)
-    bar_len = 20
-    filled  = max(0, min(bar_len, int(round(pct / 100 * bar_len))))
-    bar     = "●" * filled + "○" * (bar_len - filled)
-    speed   = state.get("speed")
-    title   = state.get("title") or "Downloading"
-    return (f"📡 **{title[:80]}**\n\nStatus: `{state.get('status', '?')}`\n"
-            f"`{bar}` `{pct:5.1f}%`\n"
-            f"💾 Size: `{_fmt_bytes(state.get('downloaded'))}` / `{_fmt_bytes(state.get('total'))}`\n"
-            f"⚡ Speed: `{f'{_fmt_bytes(speed)}/s' if speed else '?'}`\n"
-            f"⏳ ETA: `{_fmt_eta(state.get('eta'))}`")
-
-
-# ---------------------------------------------------------------------------
-# /download — manifest probe helpers
-# ---------------------------------------------------------------------------
-
-_LANG_DISPLAY = {
-    "hin": "Hindi", "tam": "Tamil", "tel": "Telugu", "kan": "Kannada",
-    "eng": "English", "mal": "Malayalam", "ben": "Bengali", "mar": "Marathi",
-    "pun": "Punjabi", "urd": "Urdu", "und": "Unknown", "mul": "Multi",
-}
-_ACODEC_LABEL = {
-    "mp4a": "AAC", "ec-3": "DD+", "ac-3": "DD",
-    "opus": "Opus", "vorbis": "OGG", "flac": "FLAC",
-}
-_VCODEC_LABEL = {
-    "avc1": "H.264", "hvc1": "H.265", "hev1": "H.265",
-    "vp9": "VP9", "av01": "AV1",
-}
-
-
-def _fmt_codec(codec: str, table: dict) -> str:
-    if not codec or codec == "none":
-        return "?"
-    c = codec.lower()
-    for k, v in table.items():
-        if c.startswith(k):
-            return v
-    return codec[:6]
-
-
-def _lang_display(lang: str) -> str:
-    return _LANG_DISPLAY.get((lang or "und").lower()[:3], (lang or "UND").upper()[:6])
-
-
-def _probe_url_formats(url: str, cookies_path: str = "") -> dict:
-    """Run yt-dlp extract_info(download=False) and return video/audio format lists."""
-    opts: dict = {
-        "quiet": True, "no_warnings": True, "noplaylist": True,
-        "geo_bypass": True, "geo_bypass_country": "IN",
-        "nocheckcertificate": True,
-        "http_headers": {
-            "User-Agent": (
-                "Mozilla/5.0 (Linux; Android 11; SM-G973F) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/124.0.0.0 Mobile Safari/537.36"
-            ),
-            "Accept-Language": "en-IN,en;q=0.9,hi;q=0.8",
-        },
-    }
-    if cookies_path and os.path.exists(cookies_path):
-        opts["cookiefile"] = cookies_path
-
-    with yt_dlp.YoutubeDL(opts) as ydl:
-        info = ydl.extract_info(url, download=False)
-
-    if info.get("_type") == "playlist":
-        entries = info.get("entries") or []
-        info = entries[0] if entries else info
-
-    title   = info.get("title") or ""
-    formats = info.get("formats") or []
-
-    # ── Video formats ──────────────────────────────────────────────────────
-    def _vscore(f): return (f.get("height") or 0, f.get("vbr") or f.get("tbr") or 0)
-    seen_v: set = set()
-    video_fmts: list = []
-    for muxed_pass in (False, True):     # prefer video-only; fall back to muxed
-        for f in sorted(formats, key=_vscore, reverse=True):
-            vc = f.get("vcodec", "none")
-            ac = f.get("acodec", "none")
-            if vc == "none":
-                continue
-            if not muxed_pass and ac != "none":
-                continue
-            if muxed_pass and ac == "none":
-                continue
-            h = int(f.get("height") or 0)
-            if h < 100 or h in seen_v:
-                continue
-            seen_v.add(h)
-            video_fmts.append({
-                "id":     f["format_id"],
-                "height": h,
-                "vbr":    int(f.get("vbr") or f.get("tbr") or 0),
-                "vcodec": f.get("vcodec", ""),
-                "muxed":  ac != "none",
-            })
-        if video_fmts:
-            break
-
-    # ── Audio formats ──────────────────────────────────────────────────────
-    seen_a: set = set()
-    audio_fmts: list = []
-    for f in sorted(formats, key=lambda x: (x.get("abr") or 0), reverse=True):
-        ac = f.get("acodec", "none")
-        vc = f.get("vcodec", "none")
-        if ac == "none" or vc != "none":
-            continue
-        lang   = (f.get("language") or "und").lower()[:3]
-        clabel = _fmt_codec(ac, _ACODEC_LABEL)
-        abr    = int(f.get("abr") or 0)
-        key    = (lang, clabel)
-        if key in seen_a:
-            continue
-        seen_a.add(key)
-        audio_fmts.append({
-            "id":          f["format_id"],
-            "lang":        lang,
-            "lang_name":   _lang_display(lang),
-            "abr":         abr,
-            "acodec":      ac,
-            "codec_label": clabel,
-        })
-
-    return {"title": title, "video_formats": video_fmts, "audio_formats": audio_fmts}
-
-
-def _dl_status_text(sess: dict) -> str:
-    url    = sess.get("url") or ""
-    title  = sess.get("probe_title") or ""
-    vfmts  = sess.get("video_formats") or []
-    afmts  = sess.get("audio_formats") or []
-    sel_v  = sess.get("sel_video_id") or "best"
-    sel_a  = sess.get("sel_audio_ids") or []
-    v_lbl  = ("🏆 Best" if sel_v == "best"
-               else next((f"{f['height']}p {_fmt_codec(f['vcodec'], _VCODEC_LABEL)}"
-                          for f in vfmts if f["id"] == sel_v), sel_v))
-    a_lbl  = (", ".join(
-                  next((f"{f['lang_name']} {f['codec_label']}"
-                        for f in afmts if f["id"] == aid), aid)
-                  for aid in sel_a
-              ) or "🏆 Best")
-    return (
-        f"🎬 **Download Setup**\n\n"
-        f"🔗 `{url[:55]}{'…' if len(url)>55 else ''}`\n"
-        + (f"📌 **{title[:60]}**\n\n" if title else "\n")
-        + f"🎥 Video : `{v_lbl}`\n"
-        f"🔊 Audio : `{a_lbl}`\n\n"
-        f"📺 {len(vfmts)} video quality option(s) found\n"
-        f"🔈 {len(afmts)} audio track(s) found"
-    )
-
-
-def _dl_video_keyboard(uid: int, video_fmts: list, sel_vid: str) -> InlineKeyboardMarkup:
-    rows: list = []
-    for i in range(0, len(video_fmts), 2):
-        row = []
-        for f in video_fmts[i: i + 2]:
-            tick  = "✅ " if f["id"] == sel_vid else ""
-            codec = _fmt_codec(f["vcodec"], _VCODEC_LABEL)
-            kbps  = f" {f['vbr']}k" if f["vbr"] else ""
-            row.append(InlineKeyboardButton(
-                f"{tick}{f['height']}p {codec}{kbps}",
-                callback_data=f"dl:{uid}:v:{f['id']}"
-            ))
-        rows.append(row)
-    tick = "✅ " if sel_vid == "best" else ""
-    rows.append([InlineKeyboardButton(f"{tick}🏆 Best Available", callback_data=f"dl:{uid}:v:best")])
-    rows.append([InlineKeyboardButton("🎵 Next: Audio Tracks →", callback_data=f"dl:{uid}:phase:audio")])
-    rows.append([
-        InlineKeyboardButton("⬇️ Skip → Download", callback_data=f"dl:{uid}:go"),
-        InlineKeyboardButton("❌ Cancel",            callback_data=f"dl:{uid}:cancel"),
-    ])
-    return InlineKeyboardMarkup(rows)
-
-
-def _dl_audio_keyboard(uid: int, audio_fmts: list, sel_ids: list,
-                        default_lang: str = "") -> InlineKeyboardMarkup:
-    rows: list = []
-    for f in audio_fmts:
-        is_sel    = f["id"] in sel_ids
-        is_default = (default_lang and
-                      default_lang.lower() in (f.get("lang_name") or "").lower())
-        tick  = "✅" if is_sel else "○"
-        def_tag = " 🏷" if is_default else ""
-        kbps  = f" {f['abr']}k" if f["abr"] else ""
-        rows.append([InlineKeyboardButton(
-            f"{tick} {f['lang_name']} • {f['codec_label']}{kbps}{def_tag}",
-            callback_data=f"dl:{uid}:a:{f['id']}"
-        )])
-    rows.append([
-        InlineKeyboardButton("✅ Select All", callback_data=f"dl:{uid}:aall"),
-        InlineKeyboardButton("🏆 Best Only",  callback_data=f"dl:{uid}:abest"),
-    ])
-    rows.append([
-        InlineKeyboardButton("◀ Video Quality", callback_data=f"dl:{uid}:phase:video"),
-        InlineKeyboardButton("⬇️ Download Now", callback_data=f"dl:{uid}:go"),
-    ])
-    rows.append([InlineKeyboardButton("❌ Cancel", callback_data=f"dl:{uid}:cancel")])
-    return InlineKeyboardMarkup(rows)
-
-
-# Fallback keyboard when manifest probing fails
-_DL_QUALITY_OPTS = {
-    "best":  ("🏆 Best Quality", "bv*+ba/b"),
-    "2160":  ("🎬 4K  (2160p)", "bestvideo[height<=2160]+bestaudio/best[height<=2160]"),
-    "1080":  ("🖥  1080p",       "bestvideo[height<=1080]+bestaudio/best[height<=1080]"),
-    "720":   ("📺 720p",         "bestvideo[height<=720]+bestaudio/best[height<=720]"),
-    "480":   ("📱 480p",         "bestvideo[height<=480]+bestaudio/best[height<=480]"),
-    "360":   ("🔹 360p",         "bestvideo[height<=360]+bestaudio/best[height<=360]"),
-    "audio": ("🎵 Audio Only",   "bestaudio/best"),
-}
-
-
-def _dl_fallback_keyboard(uid: int, sel_q: str = "best") -> InlineKeyboardMarkup:
-    rows = []
-    q_items = list(_DL_QUALITY_OPTS.items())
-    for i in range(0, len(q_items), 2):
-        row = []
-        for key, (label, _) in q_items[i: i + 2]:
-            tick = "✅ " if key == sel_q else ""
-            row.append(InlineKeyboardButton(f"{tick}{label}", callback_data=f"dl:{uid}:q:{key}"))
-        rows.append(row)
-    rows.append([
-        InlineKeyboardButton("⬇️ Download", callback_data=f"dl:{uid}:go"),
-        InlineKeyboardButton("❌ Cancel",   callback_data=f"dl:{uid}:cancel"),
-    ])
-    return InlineKeyboardMarkup(rows)
-
-
-async def handle_ott_download(client: Client, message: Message,
-                               url: str = "",
-                               filename: str = "",
-                               video_id: str = "best",
-                               audio_ids: list = None,
-                               video_formats: list = None,
-                               audio_formats: list = None,
-                               status_msg=None,
-                               # Legacy params kept for backward compat
-                               fmt: str = "",
-                               audio_lang: str = ""):
-    user_id  = message.from_user.id
-    msg      = status_msg
-    save_dir: Optional[str] = None
-    if audio_ids is None:
-        audio_ids = []
-    try:
-        if msg is None:
-            msg = await message.reply_text("⬇️ Initializing download...")
-        else:
-            try:
-                await msg.edit_text("⬇️ Initializing download...")
-            except Exception:
-                pass
-        # URL / filename: prefer explicit params, fall back to parsing message.text
-        if not url:
-            parts        = message.text.split(maxsplit=2)
-            url          = parts[1].strip()
-            raw_filename = parts[2].strip() if len(parts) > 2 else ""
-        else:
-            raw_filename = filename
-        for bad in '/\\:*?"<>|':
-            raw_filename = raw_filename.replace(bad, "_")
-
-        save_dir = join(DOWNLOAD_DIRECTORY, f"ott_{int(time.time())}")
-        os.makedirs(save_dir, exist_ok=True)
-        user_tasks[user_id]  = time.time()
-        user_status[user_id] = {"id": int(user_tasks[user_id]), "user_id": user_id,
-                                "filename": raw_filename or "(auto)", "duration_str": "—",
-                                "channel_name": "OTT", "url": url, "progress": "0%"}
-        state: dict = {"status": "starting", "percent": 0.0, "downloaded": 0,
-                       "total": None, "speed": None, "eta": None, "title": "Resolving..."}
-        ott_progress[user_id] = state
-
-        def _hook(d: dict):
-            if user_id in cancelled_users:
-                raise yt_dlp.utils.DownloadCancelled("Cancelled by user.")
-            st = d.get("status")
-            if st == "downloading":
-                state["status"]     = "downloading"
-                state["downloaded"] = d.get("downloaded_bytes") or 0
-                state["total"]      = d.get("total_bytes") or d.get("total_bytes_estimate")
-                if state["total"]:
-                    state["percent"] = state["downloaded"] * 100 / state["total"]
-                state["speed"] = d.get("speed")
-                state["eta"]   = d.get("eta")
-                info = d.get("info_dict") or {}
-                if info.get("title"):
-                    state["title"] = info["title"]
-            elif st == "finished":
-                state["status"]  = "finalizing"
-                state["percent"] = 100.0
-
-        async def watcher():
-            last_text = ""
-            while user_id in user_tasks:
-                if user_id in cancelled_users:
-                    return
-                txt = _ott_progress_text(state)
-                if txt != last_text:
-                    try:
-                        await msg.edit_text(txt)
-                        last_text = txt
-                    except Exception:
-                        pass
-                if user_status.get(user_id):
-                    user_status[user_id]["progress"] = f"{state['percent']:.1f}%"
-                await asyncio.sleep(10)
-
-        watcher_task           = asyncio.create_task(watcher())
-        progress_tasks[user_id] = watcher_task
-
-        outtmpl  = join(save_dir, (raw_filename or "%(title).200B") + ".%(ext)s")
-
-        # ── Build yt-dlp format string from selected IDs ─────────────────────
-        if fmt:
-            _fmt_str = fmt   # legacy caller provided fmt directly
-            _extra_audio_ids: list = []
-        elif video_id == "best":
-            _fmt_str = "bv*+ba/b"
-            _extra_audio_ids = audio_ids[1:] if len(audio_ids) > 1 else []
-            if audio_ids:
-                _fmt_str = f"bv*+{audio_ids[0]}/bv*+ba/b"
-                _extra_audio_ids = list(audio_ids[1:])
-        else:
-            _primary_audio = audio_ids[0] if audio_ids else "ba"
-            _fmt_str = f"{video_id}+{_primary_audio}/{video_id}/b"
-            _extra_audio_ids = list(audio_ids[1:]) if len(audio_ids) > 1 else []
-
-        # Multi-audio: MKV preserves multiple tracks; switch output if needed
-        _has_multi_audio = bool(_extra_audio_ids)
-        _merge_fmt = "mkv" if _has_multi_audio else "mp4"
-
-        ydl_opts = {
-            # ── Output ──────────────────────────────────────────────────────
-            "outtmpl":              outtmpl,
-            "trim_file_name":       200,
-            "merge_output_format":  _merge_fmt,
-
-            # ── Format selection ─────────────────────────────────────────────
-            "format":  _fmt_str,
-            # Prefer h264/aac in mp4 — best device compatibility
-            "format_sort": ["res", "ext:mp4:m4a", "codec:h264:aac", "size", "br"],
-
-            # ── Reliability ─────────────────────────────────────────────────
-            "noplaylist":               True,
-            "retries":                  5,
-            "fragment_retries":         5,
-            "file_access_retries":       3,
-            "extractor_retries":         3,
-            "concurrent_fragment_downloads": 3,   # low for weak server
-            "socket_timeout":           30,
-            "hls_use_mpegts":           True,
-            "noprogress":               True,
-
-            # ── Metadata & thumbnail ─────────────────────────────────────────
-            "writethumbnail":           False,
-            "embedthumbnail":           False,
-            "add_metadata":             True,
-
-            # ── Logging ──────────────────────────────────────────────────────
-            "quiet":                    True,
-            "no_warnings":              True,
-            "verbose":                  False,
-
-            # ── Geo & identity ───────────────────────────────────────────────
-            "geo_bypass":               True,
-            "geo_bypass_country":       "IN",
-            "nocheckcertificate":       True,
-
-            # ── FFmpeg postprocessor ─────────────────────────────────────────
-            "prefer_ffmpeg":            True,
-            "postprocessor_args": {
-                "default": ["-threads", "0"],           # use all CPU cores
-                "merger": [
-                    "-c:v", "copy", "-c:a", "copy",
-                    "-movflags", "+faststart",           # web-optimised MP4
-                ],
-            },
-
-            # ── Progress hook ────────────────────────────────────────────────
-            "progress_hooks": [_hook],
-
-            # ── Site-specific extractor args ──────────────────────────────────
-            "extractor_args": {
-                "hotstar":   {"video_resolution": ["max"]},
-                "sonyliv":   {"prefer_subs_lang": ["hi"], "device_id": ["default"]},
-                "jiosaavn":  {"quality": ["320kbps"]},
-                "youtube":   {
-                    "player_client": ["ios", "android", "mweb", "web"],
-                    "skip": ["hls", "dash"],
-                },
-            },
-            "http_headers": {
-                "User-Agent":      "Mozilla/5.0 (Linux; Android 11; SM-G973F) "
-                                   "AppleWebKit/537.36 (KHTML, like Gecko) "
-                                   "Chrome/124.0.0.0 Mobile Safari/537.36",
-                "Accept-Language": "en-IN,en;q=0.9,hi;q=0.8",
-                "Accept":          "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            },
-        }
-        if _user_has_cookies(user_id):
-            ydl_opts["cookiefile"] = _user_cookies_path(user_id)
-
-        def _run_ydl():
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(url, download=True)
-                if "requested_downloads" in info and info["requested_downloads"]:
-                    info["_final_filepath"] = info["requested_downloads"][0]["filepath"]
-                else:
-                    info["_final_filepath"] = ydl.prepare_filename(info)
-                return info
-
-        try:
-            info = await asyncio.to_thread(_run_ydl)
-        except yt_dlp.utils.DownloadCancelled:
-            await msg.edit_text("Download cancelled.")
-            return
-
-        watcher_task.cancel()
-        progress_tasks.pop(user_id, None)
-
-        video_path = info.get("_final_filepath")
-        if not video_path or not os.path.exists(video_path):
-            raise Exception("yt-dlp finished but the output file is missing.")
-
-        # ── Extra audio tracks (multi-audio) ─────────────────────────────────
-        if _extra_audio_ids:
-            await msg.edit_text("🔊 Downloading extra audio tracks…")
-            extra_audio_paths = []
-            _base_opts = {k: v for k, v in ydl_opts.items()
-                          if k not in ("format", "outtmpl", "merge_output_format",
-                                       "progress_hooks", "postprocessor_args")}
-            for _aid in _extra_audio_ids:
-                _extra_tmpl = join(save_dir, f"extra_audio_{_aid}.%(ext)s")
-                _extra_opts = {**_base_opts, "format": _aid, "outtmpl": _extra_tmpl,
-                               "quiet": True, "no_warnings": True}
-                try:
-                    def _dl_extra(opts=_extra_opts, _url=url):
-                        with yt_dlp.YoutubeDL(opts) as _ydl:
-                            _ydl.download([_url])
-                    await asyncio.to_thread(_dl_extra)
-                    for _fn in os.listdir(save_dir):
-                        if _fn.startswith(f"extra_audio_{_aid}"):
-                            extra_audio_paths.append(join(save_dir, _fn))
-                            break
-                except Exception as _ex:
-                    LOG.warning(f"Extra audio {_aid} failed: {_ex}")
-
-            if extra_audio_paths:
-                await msg.edit_text("🧩 Merging audio tracks…")
-                _merged = join(save_dir, f"multitrack_{int(time.time())}.mkv")
-                _in_args = f'-i {shlex.quote(video_path)} ' + \
-                           " ".join(f'-i {shlex.quote(p)}' for p in extra_audio_paths)
-                _map_args = "-map 0 " + \
-                            " ".join(f"-map {i+1}:a" for i in range(len(extra_audio_paths)))
-
-                # ── Set disposition: mark user's preferred language as default ──
-                # Total audio streams = 1 (primary) + len(extra_audio_paths)
-                _total_audio = 1 + len(extra_audio_paths)
-                _pref_lang_d = (user_dl_prefs.get(user_id) or {}).get("default_audio_lang", "")
-                _default_idx = 0  # fallback: first audio stream = default
-                if _pref_lang_d and audio_formats:
-                    # Find which audio_id matches the preferred lang
-                    for _aidx, _aid in enumerate(audio_ids):
-                        _af = next((f for f in audio_formats if f["id"] == _aid), None)
-                        if _af and _pref_lang_d.lower() in (_af.get("lang_name") or "").lower():
-                            _default_idx = _aidx
-                            break
-                _disp_args = " ".join(
-                    f"-disposition:a:{_i} {'default' if _i == _default_idx else 'none'}"
-                    for _i in range(_total_audio)
-                )
-
-                _rc, _, _err = await runcmd(
-                    f'ffmpeg -hide_banner -loglevel error -nostats -y '
-                    f'{_in_args} {_map_args} -c copy {_disp_args} {shlex.quote(_merged)}'
-                )
-                if _rc == 0 and os.path.exists(_merged):
-                    video_path = _merged
-                else:
-                    LOG.warning(f"Multi-audio merge failed: {_err.strip()[:300]}")
-
-        await msg.edit_text("Download finished — preparing upload...")
-        title    = info.get("title") or os.path.basename(video_path)
-        duration = int(info.get("duration") or 0)
-
-        thumb_path = None
-        if duration > 6:
-            ts         = random.randint(2, max(duration - 2, 3))
-            cand_thumb = join(save_dir, "thumb.jpg")
-            rc, _o, _e = await runcmd(
-                f'ffmpeg -hide_banner -loglevel error -nostats -y '
-                f'-ss {ts} -i "{video_path}" -vframes 1 -q:v 2 "{cand_thumb}"')
-            if rc == 0 and os.path.exists(cand_thumb):
-                thumb_path = cand_thumb
-
-        retention_note = (f"_The video is automatically deleted from the server after "
-                          f"{_retention_label()}._")
-        caption = (f"🎬 **{BRAND_TITLE}**\n\n"
-                   f"Duration: `{TimeFormatter(duration * 1000)}`\n"
-                   f"Source: `{(info.get('extractor_key') or info.get('extractor') or 'OTT')}`\n"
-                   f"{retention_note}")
-
-        _dest = await _await_upload_choice(
-            user_id, msg,
-            f"Size: `{os.path.getsize(video_path)/(1024*1024):.1f} MB` | Duration: `{TimeFormatter(duration*1000)}`"
-        )
-        if _dest != "cancel":
-            if _dest in ("tg", "both"):
-                start_time = time.time()
-                await split_and_send_video(
-                    message, video_path, caption, duration or 0,
-                    thumb_path=thumb_path if thumb_path and os.path.exists(thumb_path) else None,
-                    status_msg=msg,
-                    progress=progress_for_pyrogram,
-                    progress_args=(message, start_time, msg, save_dir, False),
-                    _uid=user_id, _chat_id=message.chat.id,
-                )
-            if _dest in ("gd", "both"):
-                await upload_and_notify(client, message.chat.id, video_path, os.path.basename(video_path))
-        if save_dir and os.path.exists(save_dir):
-            schedule_retention_cleanup(save_dir)
-
-    except Exception as e:
-        LOG.error(f"Error in handle_ott_download: {e}", exc_info=True)
-        try:
-            err_text  = str(e)
-            err_lower = err_text.lower()
-            hints = []
-            if any(k in err_lower for k in ("drm", "widevine", "playready", "encrypted")):
-                hints.append("🔒 **DRM-protected content**. No tool can download this — try free episodes only.")
-            if any(k in err_lower for k in ("login required", "subscription", "premium", "sign in",
-                                             "registered users", "cookies")):
-                hints.append("🔑 **Login needed.** Run /set_cookies with a fresh `cookies.txt`.")
-            if any(k in err_lower for k in ("geo", "not available in your", "403", "forbidden")):
-                hints.append("🌐 **Geo-blocked** — server IP is outside India.")
-            if any(k in err_lower for k in ("expired", "session", "invalid token", "401")):
-                hints.append("⏱ **Cookies expired.** Re-export `cookies.txt` and run /set_cookies again.")
-            if "epdblocked" in err_lower:
-                hints.append(
-                    "📛 **SonyLIV API blocked** — SonyLIV is blocking yt-dlp requests.\n"
-                    "✅ **Fix:** Upload fresh SonyLIV cookies using /set_cookies and retry.\n"
-                    "• Open SonyLIV in browser → export cookies as `cookies.txt` → send to bot.\n"
-                    "• Free / non-login content may still be unavailable due to geo-blocking."
-                )
-            hint_block = ("\n\n" + "\n\n".join(hints)) if hints else ""
-
-            if is_owner(user_id) or is_admin(user_id):
-                if len(err_text) > 2500:
-                    err_text = "...[truncated]...\n" + err_text[-2500:]
-                fail_text = f"**Download failed.**\n\n`{err_text}`{hint_block}"
-            else:
-                fail_text = (
-                    "❌ **Download failed.**\n\n"
-                    "Could not download this video. Please check the link and try again."
-                    f"{hint_block}\n\nUse /contact if the problem persists."
-                )
-
-            # msg may be None if reply_text itself failed — fall back to a fresh reply
-            if msg:
-                await msg.edit_text(fail_text)
-            else:
-                await message.reply_text(fail_text)
-        except Exception:
-            pass
-        if save_dir and os.path.exists(save_dir):
-            _safe_rmtree(save_dir)
-    finally:
-        ott_progress.pop(user_id, None)
-        user_status.pop(user_id, None)
-        user_tasks.pop(user_id, None)
-        progress_tasks.pop(user_id, None)
-        cancelled_users.discard(user_id)
-
-# ---------------------------------------------------------------------------
-# Compress helpers
-# ---------------------------------------------------------------------------
-
-# ---------------------------------------------------------------------------
-# Auto-compression constants (800 MB – 1 GB → ≤360 MB, all audio tracks kept)
-# ---------------------------------------------------------------------------
-AUTO_COMPRESS_MIN_MB    = 800    # trigger threshold (inclusive)
-AUTO_COMPRESS_MAX_MB    = 1024   # upper limit (inclusive, = 1 GB)
-AUTO_COMPRESS_TARGET_MB = 355    # desired output size (headroom below 360 MB)
-AUTO_COMPRESS_HEIGHTS   = [640, 576]   # try 640p first, fall back to 576p
-
-# Persistent toggle — stored in bot_settings.json
-_BOT_SETTINGS_FILE = join(DATA_DIRECTORY, "bot_settings.json")
-
-
-def _load_bot_settings() -> dict:
-    try:
-        if os.path.exists(_BOT_SETTINGS_FILE):
-            with open(_BOT_SETTINGS_FILE, "r", encoding="utf-8") as f:
-                return json.load(f)
-    except Exception:
-        pass
-    return {}
-
-
-def _save_bot_settings(data: dict) -> None:
-    try:
-        with open(_BOT_SETTINGS_FILE, "w", encoding="utf-8") as f:
-            json.dump(data, f)
-    except Exception as e:
-        LOG.warning("Could not save bot_settings: %s", e)
-
-
-def _auto_compress_enabled() -> bool:
-    """Return True (default) unless owner explicitly disabled auto-compression."""
-    return _load_bot_settings().get("auto_compress", True)
-
-
-def _set_auto_compress(enabled: bool) -> None:
-    """Persist the auto-compress toggle."""
-    settings = _load_bot_settings()
-    settings["auto_compress"] = enabled
-    _save_bot_settings(settings)
-
-
-def _get_compress_settings() -> dict:
-    """Return current auto-compress thresholds with hard-coded defaults."""
-    s = _load_bot_settings()
-    return {
-        "min_mb":    s.get("ac_min_mb",    AUTO_COMPRESS_MIN_MB),
-        "max_mb":    s.get("ac_max_mb",    AUTO_COMPRESS_MAX_MB),
-        "target_mb": s.get("ac_target_mb", AUTO_COMPRESS_TARGET_MB),
-    }
-
-
-def _update_compress_settings(**kwargs) -> None:
-    """Persist one or more of: min_mb, max_mb, target_mb."""
-    settings = _load_bot_settings()
-    for key, value in kwargs.items():
-        settings[f"ac_{key}"] = value
-    _save_bot_settings(settings)
-
-
-COMPRESS_SIZE_OPTIONS_MB = [300, 400, 500, 600, 800]
-COMPRESS_RES_OPTIONS = [
-    ("140p", "h140"), ("240p", "h240"), ("360p", "h360"), ("480p", "h480"),
-    ("576p", "h576"), ("640p", "h640"), ("720p", "h720"),
-    ("1080p HD", "h1080hevc"), ("1080p", "h1080"), ("HQ", "hq"), ("2K", "h1440"), ("3K", "h2160"),
-]
-COMPRESS_RES_CONFIG = {
-    "h140":      {"height": 140,  "codec": "libx264", "label": "140p"},
-    "h240":      {"height": 240,  "codec": "libx264", "label": "240p"},
-    "h360":      {"height": 360,  "codec": "libx264", "label": "360p"},
-    "h480":      {"height": 480,  "codec": "libx264", "label": "480p"},
-    "h576":      {"height": 576,  "codec": "libx264", "label": "576p"},
-    "h640":      {"height": 640,  "codec": "libx264", "label": "640p"},
-    "h720":      {"height": 720,  "codec": "libx264", "label": "720p"},
-    "h1080hevc": {"height": 1080, "codec": "libx265", "label": "1080p HD (HEVC)"},
-    "h1080":     {"height": 1080, "codec": "libx264", "label": "1080p"},
-    "h1440":     {"height": 1440, "codec": "libx264", "label": "2K"},
-    "h2160":     {"height": 2160, "codec": "libx264", "label": "3K"},
-    "hq":        {"height": 0,    "codec": "libx264", "label": "HQ (original)"},
-}
-LANG_LABEL = {
-    "hin": "Hindi", "tam": "Tamil", "tel": "Telugu", "mal": "Malayalam",
-    "kan": "Kannada", "mar": "Marathi", "ben": "Bengali", "guj": "Gujarati",
-    "pan": "Punjabi", "ori": "Odia", "asm": "Assamese", "urd": "Urdu",
-    "eng": "English", "und": "Untagged", "multi": "Multi (all)",
-}
-COMPRESS_LANG_PRESET = ["hin", "tam", "tel", "mal", "kan", "mar", "eng", "multi"]
-
-
-def _compress_menu(state: dict) -> InlineKeyboardMarkup:
-    rows    = []
-    sel_size = state.get("size_mb")
-    rows.append([InlineKeyboardButton(f"{'✓ ' if sel_size == s else ''}{s} MB",
-                                      callback_data=f"cmp:size:{s}")
-                 for s in COMPRESS_SIZE_OPTIONS_MB])
-    sel_res     = state.get("res_key")
-    res_buttons = [InlineKeyboardButton(f"{'✓ ' if sel_res == k else ''}{lbl}",
-                                        callback_data=f"cmp:res:{k}")
-                   for lbl, k in COMPRESS_RES_OPTIONS]
-    for i in range(0, len(res_buttons), 4):
-        rows.append(res_buttons[i:i + 4])
-    sel_langs = set(state.get("langs", []))
-    available = state.get("available_langs", [])
-    visible   = [l for l in COMPRESS_LANG_PRESET if l == "multi" or l in available]
-    for extra in available:
-        if extra not in COMPRESS_LANG_PRESET and extra not in visible:
-            visible.append(extra)
-    if not visible:
-        visible = ["multi"]
-    lang_buttons = [InlineKeyboardButton(f"{'✓ ' if l in sel_langs else ''}{LANG_LABEL.get(l, l.upper())}",
-                                         callback_data=f"cmp:lang:{l}")
-                    for l in visible]
-    for i in range(0, len(lang_buttons), 3):
-        rows.append(lang_buttons[i:i + 3])
-    rows.append([InlineKeyboardButton("▶ Start", callback_data="cmp:start"),
-                 InlineKeyboardButton("✖ Cancel", callback_data="cmp:cancel")])
-    return InlineKeyboardMarkup(rows)
-
-
-def _compress_status_text(state: dict) -> str:
-    duration   = state.get("duration", 0)
-    src_h      = state.get("video_height", 0)
-    avail      = state.get("available_langs", [])
-    avail_text = (", ".join(LANG_LABEL.get(l, l.upper()) for l in avail)
-                  if avail else "(no language tags)")
-    sel_size   = state.get("size_mb")
-    sel_res    = state.get("res_key")
-    res_label  = COMPRESS_RES_CONFIG[sel_res]["label"] if sel_res else "—"
-    sel_langs  = state.get("langs") or []
-    langs_text = ", ".join(LANG_LABEL.get(l, l.upper()) for l in sel_langs) or "—"
-    return (f"**🗜 Video Compressor**\n\nSource: `{TimeFormatter(int(duration * 1000))}`"
-            f" • `{src_h}p` • `{len(state.get('audio_streams', []))}` audio track(s)\n"
-            f"Available audio langs: {avail_text}\n\n**Choose options:**\n"
-            f"• Target size: `{sel_size or '—'} MB`\n• Resolution / codec: `{res_label}`\n"
-            f"• Audio: `{langs_text}`\n\n"
-            f"_Default audio is **Hindi** when present. Tap **Multi** to keep all tracks._")
-
-
-def _compress_progress_text(pct, done_sec, dur_sec, size_bytes, target_mb, speed_mult):
-    remaining_sec = max(0.0, (dur_sec - done_sec) / max(0.05, speed_mult))
-    return _make_encode_progress_text(
-        "Compressing", pct,
-        size_bytes=int(size_bytes),
-        total_bytes=int(target_mb * 1024 * 1024),
-        speed_x=speed_mult,
-        eta_sec=remaining_sec,
-    )
-
-
-async def auto_compress_large_video(
-    video_path: str, save_dir: str, duration: float,
-    status_msg, user_id: int,
-) -> str:
-    """
-    Automatically compress a recording that falls between AUTO_COMPRESS_MIN_MB and
-    AUTO_COMPRESS_MAX_MB (800 MB – 1 GB) down to AUTO_COMPRESS_TARGET_MB (~355 MB).
-
-    Resolution order: 640p → 576p (first one that succeeds is used).
-    ALL audio tracks are preserved with -map 0:a? so multi-language recordings
-    stay intact.  Subtitles are copied as-is.
-    Returns the path to the compressed file, or the original path on failure.
-    """
-    # Respect the owner toggle — skip silently if disabled
-    if not _auto_compress_enabled():
-        return video_path
-
-    cs = _get_compress_settings()
-    size_mb = os.path.getsize(video_path) / (1024 * 1024)
-    if not (cs["min_mb"] <= size_mb <= cs["max_mb"]):
-        return video_path
-
-    target_mb  = cs["target_mb"]
-    cpu_threads = str(min(os.cpu_count() or 1, 2))
-
-    for height in AUTO_COMPRESS_HEIGHTS:
-        out_path = join(save_dir, f"autocomp_{height}p_{int(time.time())}.mkv")
-
-        # Reserve ~512 kbps for all audio tracks combined (4 tracks × 128 kbps).
-        # Use 'fast' preset so compression finishes well within 4 minutes.
-        target_total_kbps = (target_mb * 8 * 1024) / max(1, duration)
-        video_kbps = max(200, int(target_total_kbps - 512 - 32))
-
-        args = [
-            "ffmpeg", "-hide_banner", "-loglevel", "error", "-nostats",
-            "-threads", cpu_threads,
-            "-progress", "pipe:1", "-y",
-            "-i", video_path,
-            "-map", "0:v:0",     # primary video track
-            "-map", "0:a?",      # ALL audio tracks — multi-language safe
-            "-map", "0:s?",      # subtitle tracks copied verbatim
-            "-vf", f"scale=-2:{height}:flags=lanczos",
-            "-c:v", "libx264",
-            "-b:v", f"{video_kbps}k",
-            "-maxrate", f"{int(video_kbps * 1.4)}k",
-            "-bufsize", f"{int(video_kbps * 2.5)}k",
-            "-preset", "fast",   # balances speed vs quality; keeps ≤4-min window
-            "-tune", "film",
-            "-c:a", "aac", "-b:a", "128k", "-ar", "48000",
-            "-c:s", "copy",
-            out_path,
-        ]
-
-        try:
-            await status_msg.edit_text(
-                f"🗜 **Auto-Compressing…**\n\n"
-                f"File size: `{size_mb:.0f} MB` (exceeds 800 MB threshold)\n"
-                f"Target: `~{target_mb} MB` @ `{height}p`\n"
-                f"_All audio/language tracks will be preserved._"
-            )
-        except Exception:
-            pass
-
-        proc = await asyncio.create_subprocess_exec(
-            *args,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        user_ffmpeg_pids[user_id] = proc.pid
-        progress_state = {"out_time_us": 0, "total_size": 0, "speed": 1.0}
-
-        async def _read_prog(_proc=proc):
-            while True:
-                line = await _proc.stdout.readline()
-                if not line:
-                    return
-                text = line.decode("utf-8", errors="ignore").strip()
-                if "=" not in text:
+        size = os.path.getsize(path)
+        uploaded = datetime.fromtimestamp(os.path.getmtime(path), tz=IST)
+        cookie_lines = []
+        with open(path, "r", encoding="utf-8", errors="replace") as handle:
+            for line in handle:
+                stripped = line.strip()
+                if not stripped or stripped.startswith("#"):
                     continue
-                k, v = text.split("=", 1)
-                if k == "out_time_us":
-                    try: progress_state["out_time_us"] = int(v)
-                    except ValueError: pass
-                elif k == "total_size":
-                    try: progress_state["total_size"] = int(v)
-                    except ValueError: pass
-                elif k == "speed" and v not in ("N/A", ""):
-                    try: progress_state["speed"] = float(v.rstrip("x"))
-                    except ValueError: pass
+                fields = stripped.split("\t")
+                if len(fields) >= 7:
+                    cookie_lines.append(fields)
+        hosts = sorted({
+            fields[0].lstrip(".")
+            for fields in cookie_lines
+            if fields[0].strip()
+        })
+        host_text = ", ".join(hosts[:8]) or "Unknown"
+        if len(hosts) > 8:
+            host_text += f" (+{len(hosts) - 8} more)"
+        return (
+            "✅ Cookies stored.\n\n"
+            f"• Cookie lines: `{len(cookie_lines)}`\n"
+            f"• File size: `{size:,} bytes`\n"
+            f"• Hosts: `{host_text}`\n"
+            f"• Uploaded: `{uploaded.strftime('%Y-%m-%d %H:%M %Z')}`"
+        )
+    except OSError:
+        return "⚠️ Cookies are stored, but their status could not be read."
 
-        async def _render_prog(_proc=proc):
-            while _proc.returncode is None:
-                done_sec = progress_state["out_time_us"] / 1_000_000
-                pct      = min(100.0, done_sec / max(1, duration) * 100)
-                cur_mb   = progress_state["total_size"] / (1024 * 1024)
-                spd      = progress_state["speed"]
-                bar_filled = int(pct / 5)
-                bar = "█" * bar_filled + "░" * (20 - bar_filled)
-                try:
-                    await status_msg.edit_text(
-                        f"🗜 **Auto-Compressing…** {pct:.1f}%\n"
-                        f"`{bar}`\n\n"
-                        f"Resolution: `{height}p` | Target: `{target_mb} MB`\n"
-                        f"Current size: `{cur_mb:.1f} MB` | Speed: `{spd:.1f}x`\n"
-                        f"_All audio tracks preserved ✓_"
-                    )
-                except Exception:
-                    pass
-                await asyncio.sleep(8)
 
-        reader_task   = asyncio.create_task(_read_prog())
-        renderer_task = asyncio.create_task(_render_prog())
-
-        rc = await proc.wait()
-        reader_task.cancel()
-        renderer_task.cancel()
-        user_ffmpeg_pids.pop(user_id, None)
-
-        if rc != 0:
-            err = (await proc.stderr.read()).decode(errors="ignore")
-            LOG.warning(f"auto_compress {height}p failed rc={rc}: {err[-500:]}")
-            try:
-                os.remove(out_path)
-            except Exception:
-                pass
-            continue  # try next resolution
-
-        if not os.path.exists(out_path) or os.path.getsize(out_path) == 0:
-            LOG.warning(f"auto_compress {height}p produced empty file")
+def _validate_netscape_cookie_file(path: str) -> tuple[bool, str]:
+    """Validate the header and tab-separated fields of a Netscape cookie file."""
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as handle:
+            content = handle.read()
+    except OSError:
+        return False, "The cookie file could not be read."
+    if not content.strip():
+        return False, "The cookie file is empty."
+    header = content[:4096]
+    if "# Netscape HTTP Cookie File" not in header:
+        return False, "The file must be in Netscape cookies.txt format."
+    valid_cookie_lines = 0
+    for raw_line in content.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
             continue
-
-        out_mb = os.path.getsize(out_path) / (1024 * 1024)
-        LOG.info(
-            f"auto_compress: {size_mb:.0f} MB → {out_mb:.1f} MB @ {height}p "
-            f"uid={user_id}"
-        )
-        try:
-            await status_msg.edit_text(
-                f"✅ **Auto-Compression Done!**\n\n"
-                f"Original: `{size_mb:.0f} MB`  →  Compressed: `{out_mb:.1f} MB`\n"
-                f"Resolution: `{height}p` | All audio tracks kept ✓\n\n"
-                f"_Preparing upload options…_"
-            )
-        except Exception:
-            pass
-        await asyncio.sleep(2)
-        return out_path
-
-    # All resolutions failed — warn and fall back to the original file
-    LOG.warning(f"auto_compress: all resolutions failed, using original uid={user_id}")
-    try:
-        await status_msg.edit_text(
-            f"⚠️ Auto-compression failed — uploading original "
-            f"`{size_mb:.0f} MB` file."
-        )
-    except Exception:
-        pass
-    await asyncio.sleep(2)
-    return video_path
+        if len(line.split("\t")) < 7:
+            continue
+        valid_cookie_lines += 1
+    if not valid_cookie_lines:
+        return False, "No valid Netscape cookie entries were found."
+    return True, ""
 
 
-async def run_compress(client: Client, status_msg: Message, state: dict):
-    user_id  = state["user_id"]
-    save_dir = state["save_dir"]
-    src      = state["src_path"]
-    duration = state["duration"]
-    target_mb = state["size_mb"]
-    res_cfg  = COMPRESS_RES_CONFIG[state["res_key"]]
-    langs    = state["langs"]
-    out_path = join(save_dir, f"compressed_{int(time.time())}.mkv")
-
-    user_tasks[user_id]  = time.time()
-    user_status[user_id] = {"id": int(user_tasks[user_id]), "user_id": user_id,
-                            "filename": os.path.basename(out_path),
-                            "duration_str": TimeFormatter(int(duration * 1000)),
-                            "channel_name": "Compress", "url": "(local)", "progress": "0%"}
-
-    if "multi" in langs:
-        kept_audio = list(state["audio_streams"])
-    else:
-        kept_audio = [s for s in state["audio_streams"] if s["lang"] in langs]
-    audio_kbps_per   = 128
-    audio_total_kbps = audio_kbps_per * max(1, len(kept_audio) or 1)
-    target_total_kbps = (target_mb * 8 * 1024) / max(1, duration)
-    video_kbps       = max(80, int(target_total_kbps - audio_total_kbps - 32))
-
-    cpu_threads = str(min(os.cpu_count() or 1, 2))   # cap at 2 for weak server
-    args = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-nostats",
-            "-threads", cpu_threads,
-            "-progress", "pipe:1", "-y", "-i", src, "-map", "0:v:0"]
-    if "multi" in langs or not kept_audio:
-        args += ["-map", "0:a?"]
-    else:
-        for s in kept_audio:
-            args += ["-map", f"0:{s['index']}"]
-    if res_cfg["height"] > 0:
-        args += ["-vf", f"scale=-2:{res_cfg['height']}:flags=lanczos"]
-    if state["res_key"] == "hq":
-        args += ["-c:v", res_cfg["codec"], "-crf", "18", "-preset", "medium",
-                 "-tune", "film"]
-    elif res_cfg["codec"] == "libx265":
-        args += ["-c:v", "libx265", "-b:v", f"{video_kbps}k",
-                 "-maxrate", f"{int(video_kbps * 1.4)}k", "-bufsize", f"{int(video_kbps * 2.5)}k",
-                 "-preset", "medium", "-x265-params", "log-level=error:aq-mode=3",
-                 "-tag:v", "hvc1"]
-    else:
-        args += ["-c:v", "libx264", "-b:v", f"{video_kbps}k",
-                 "-maxrate", f"{int(video_kbps * 1.4)}k", "-bufsize", f"{int(video_kbps * 2.5)}k",
-                 "-preset", "medium", "-tune", "film"]
-    args += ["-c:a", "aac", "-b:a", f"{audio_kbps_per}k", "-ar", "48000",
-             "-movflags", "+faststart",   # MP4 optimised for streaming/Telegram
-             out_path]
-
-    try:
-        await status_msg.edit_text("Compressing — preparing...", reply_markup=None)
-    except Exception:
-        pass
-
-    proc = await asyncio.create_subprocess_exec(
-        *args, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+@require_verification
+async def set_cookies_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Open a short-lived window for the user's cookies.txt upload."""
+    user_id = update.effective_user.id
+    PENDING_COOKIE_UPLOADS[user_id] = time.time()
+    await update.message.reply_text(
+        "🍪 *OTT Cookies Upload*\n\n"
+        "Send your `cookies.txt` file now.\n"
+        "It must be in Netscape HTTP Cookie File format.\n\n"
+        "⏱ Upload window: 5 minutes",
+        parse_mode=ParseMode.MARKDOWN,
     )
-    user_ffmpeg_pids[user_id] = proc.pid
-    progress_state = {"out_time_us": 0, "total_size": 0, "speed": 1.0}
 
-    async def read_progress():
-        while True:
-            line = await proc.stdout.readline()
-            if not line:
-                return
-            text = line.decode("utf-8", errors="ignore").strip()
-            if "=" not in text:
-                continue
-            k, v = text.split("=", 1)
-            if k == "out_time_us":
-                try: progress_state["out_time_us"] = int(v)
-                except ValueError: pass
-            elif k == "total_size":
-                try: progress_state["total_size"] = int(v)
-                except ValueError: pass
-            elif k == "speed" and v not in ("N/A", ""):
-                try: progress_state["speed"] = float(v.rstrip("x"))
-                except ValueError: pass
 
-    async def render():
-        last = ""
-        while proc.returncode is None:
-            if user_id in cancelled_users:
-                return
-            done_sec = progress_state["out_time_us"] / 1_000_000
-            pct      = min(100.0, done_sec / max(1, duration) * 100)
-            txt      = _compress_progress_text(pct, done_sec, duration,
-                                               progress_state["total_size"], target_mb,
-                                               progress_state["speed"])
-            if txt != last:
-                try:
-                    await status_msg.edit_text(txt)
-                    last = txt
-                    if user_status.get(user_id):
-                        user_status[user_id]["progress"] = f"{pct:.1f}%"
-                except Exception:
-                    pass
-            await asyncio.sleep(10)
+@require_verification
+async def cookies_status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        _cookies_summary(update.effective_user.id),
+        parse_mode=ParseMode.MARKDOWN,
+    )
 
-    progress_reader   = asyncio.create_task(read_progress())
-    progress_renderer = asyncio.create_task(render())
-    progress_tasks[user_id] = progress_renderer
 
+@require_verification
+async def del_cookies_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    PENDING_COOKIE_UPLOADS.pop(update.effective_user.id, None)
+    path = _user_cookies_path(update.effective_user.id)
     try:
-        rc = await proc.wait()
-        progress_reader.cancel()
-        progress_renderer.cancel()
-        user_ffmpeg_pids.pop(user_id, None)
+        if os.path.exists(path):
+            os.remove(path)
+            await update.message.reply_text("✅ Stored cookies deleted.")
+        else:
+            await update.message.reply_text("❌ No cookies stored.")
+    except OSError:
+        logger.exception("Cookie deletion failed for user %s", update.effective_user.id)
+        await update.message.reply_text("❌ Cookies could not be deleted.")
 
-        if user_id in cancelled_users:
-            try: await status_msg.edit_text("Compress cancelled.")
-            except Exception: pass
-            _safe_rmtree(save_dir)
+
+async def cookies_document_handler(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+):
+    """Accept a cookies.txt document only after /set_cookies."""
+    user = update.effective_user
+    document = update.message.document if update.message else None
+    if not user or not document:
+        return
+    if not (
+        is_owner(user.id)
+        or is_admin(user.id)
+        or is_premium(user.id)
+        or is_verified(user.id)
+    ):
+        return
+    started_at = PENDING_COOKIE_UPLOADS.get(user.id)
+    if started_at is None:
+        return
+    if time.time() - started_at > COOKIE_UPLOAD_TTL_SECONDS:
+        PENDING_COOKIE_UPLOADS.pop(user.id, None)
+        await update.message.reply_text(
+            "⏱ Cookie upload window expired. Run `/set_cookies` again.",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        return
+    PENDING_COOKIE_UPLOADS.pop(user.id, None)
+
+    filename = (document.file_name or "").lower()
+    if not (filename.endswith(".txt") or filename.endswith(".cookies")):
+        await update.message.reply_text(
+            "❌ Please send a `cookies.txt` file in Netscape format.",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        return
+    if document.file_size and document.file_size > MAX_COOKIE_FILE_BYTES:
+        await update.message.reply_text("❌ Cookie file is too large. Maximum size is 2 MB.")
+        return
+
+    os.makedirs(COOKIES_FOLDER, exist_ok=True)
+    destination = _user_cookies_path(user.id)
+    temporary = f"{destination}.{_secrets.token_hex(8)}.tmp"
+    status = await update.message.reply_text("⬇️ Downloading and validating cookies...")
+    try:
+        telegram_file = await context.bot.get_file(document.file_id)
+        await telegram_file.download_to_drive(custom_path=temporary)
+        if os.path.getsize(temporary) > MAX_COOKIE_FILE_BYTES:
+            raise ValueError("Cookie file is too large. Maximum size is 2 MB.")
+        valid, error = _validate_netscape_cookie_file(temporary)
+        if not valid:
+            raise ValueError(error)
+        os.replace(temporary, destination)
+        await status.edit_text(
+            f"✅ Cookies saved successfully.\n\n{_cookies_summary(user.id)}",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+    except ValueError as exc:
+        try:
+            os.remove(temporary)
+        except OSError:
+            pass
+        await status.edit_text(f"❌ {exc}")
+    except Exception:
+        logger.exception("Cookie upload failed for user %s", user.id)
+        try:
+            os.remove(temporary)
+        except OSError:
+            pass
+        await status.edit_text("❌ Cookie upload failed. Please try again.")
+
+
+@require_verification
+async def di_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Diagnose a DASH manifest and optionally validate a DVR time range."""
+    full_text = " ".join(context.args).strip()
+    timerange_match = re.match(
+        r"^(.+?)\s+-t\s+(\d{1,2}:\d{2}\s*[APap][Mm])\s*-\s*"
+        r"(\d{1,2}:\d{2}\s*[APap][Mm])$",
+        full_text,
+    )
+    selected_range = None
+    if timerange_match:
+        channel_name = timerange_match.group(1).strip()
+        start_time_str = timerange_match.group(2).strip()
+        end_time_str = timerange_match.group(3).strip()
+        start_h, start_m = parse_time(start_time_str)
+        end_h, end_m = parse_time(end_time_str)
+        if start_h is None or end_h is None:
+            await update.message.reply_text(
+                "❌ Invalid time format. Example: `/di Pogo -t 07:15PM - 07:20PM`",
+                parse_mode=ParseMode.MARKDOWN,
+            )
+            return
+        selected_range = (start_h, start_m, end_h, end_m)
+        range_label = f"{start_time_str} - {end_time_str}"
+    else:
+        channel_name = full_text or "Pogo"
+        range_label = ""
+    channel = refresh_channel(find_channel(channel_name, force_refresh=True) or {})
+    if not channel.get("stream_url"):
+        await update.message.reply_text(
+            f"❌ MPD not found for `{channel_name}`.",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        return
+
+    status_message = await update.message.reply_text(
+        f"🔎 *{channel['channel_name']} MPD diagnostic…*",
+        parse_mode=ParseMode.MARKDOWN,
+    )
+    try:
+        manifest = await asyncio.get_running_loop().run_in_executor(
+            None, _fetch_dash_manifest, channel
+        )
+        info = _inspect_dash_manifest(manifest)
+        test_status, test_detail = await _test_live_start_index(channel, -600)
+        selected_seconds = None
+        if selected_range:
+            with tempfile.NamedTemporaryFile(suffix=".mpd") as selected_mpd:
+                _, selected_seconds, _ = _create_static_dash_mpd(
+                    channel, *selected_range, selected_mpd.name
+                )
+    except (ET.ParseError, requests.RequestException, ValueError) as exc:
+        await status_message.edit_text(
+            f"❌ MPD diagnostic failed:\n`{str(exc)[:800]}`",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        return
+
+    timeshift = (
+        f"{info['timeshift_seconds'] // 60} min"
+        if info["timeshift_seconds"] is not None
+        else "unknown"
+    )
+    if test_status == "accepted":
+        option_result = "✅ `-live_start_index -600` accepted"
+    elif test_status == "unsupported":
+        option_result = (
+            "❌ `-live_start_index` unsupported for this MPD "
+            "(this is a DASH input, not HLS)"
+        )
+    elif test_status == "timeout":
+        option_result = "⚠️ Option test timed out"
+    else:
+        option_result = f"❌ Option test failed: `{test_detail[:300]}`"
+
+    range_result = ""
+    if selected_range:
+        range_result = (
+            f"\n*DVR range test:*\n"
+            f"🕐 `{range_label}`\n"
+            f"✅ Selected segments: `{selected_seconds}s`\n"
+        )
+
+    await status_message.edit_text(
+        f"📡 *{channel['channel_name']} MPD report*\n\n"
+        f"Type: `{info['type']}`\n"
+        f"DVR window: `{timeshift}`\n"
+        f"Manifest update: `{info['minimum_update'] or 'unknown'}`\n"
+        f"Timeline entries: `{info['timeline_count']}`\n"
+        f"Available segments: `{info['segment_count']}`\n"
+        f"SegmentTemplate: `{'yes' if info['has_segment_template'] else 'no'}`\n\n"
+        f"💧 Watermark: `DishTV SMART+ (permanent default)`\n"
+        f"{range_result}\n"
+        f"*live_start_index test:*\n{option_result}\n\n"
+        "Pogo uses an MPEG-DASH MPD source. "
+        "`-live_start_index` is for HLS/M3U8; "
+        "normal `/rec` records from the live edge. "
+        "For a past range, use `/rec Pogo -t START - END`.",
+        parse_mode=ParseMode.MARKDOWN,
+    )
+
+
+async def _auto_delete(bot, chat_id, message_id, delay):
+    await asyncio.sleep(delay)
+    try:
+        await bot.delete_message(chat_id=chat_id, message_id=message_id)
+    except Exception:
+        pass
+
+async def check_process_slot(update: Update) -> bool:
+    """Return True if a processing slot is free, False (after sending busy msg) if all slots taken."""
+    global _active_processes
+    uid = update.effective_user.id
+    target_message = update.effective_message
+    if is_owner(uid) or is_admin(uid):
+        return True
+    if _active_processes >= MAX_PROCESSES:
+        await target_message.reply_text(
+            f"⚠️ *Server Busy ({_active_processes}/{MAX_PROCESSES} Processes Running)*\n\n"
+            "All processing slots are currently in use.\n\n"
+            "⏳ Please wait a few minutes and try again.\n\n"
+            "💎 Want instant access with higher limits and no waiting?\n"
+            f"Upgrade to the Paid Bot.\n\n"
+            f"👉 Contact: {PAID_BOT_CONTACT}",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return False
+    return True
+
+# ── Bot commands ───────────────────────────────
+
+@owner_only
+async def public_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    save_bot_mode("public")
+    await update.message.reply_text(
+        "🌍 Bot Mode Updated\n\n"
+        "✅ Public Mode Enabled\n\n"
+        "Current Mode:\n"
+        "Public"
+    )
+
+
+@owner_only
+async def private_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    save_bot_mode("private")
+    await update.message.reply_text(
+        "🔒 Bot Mode Updated\n\n"
+        "✅ Private Mode Enabled\n\n"
+        "Current Mode:\n"
+        "Private"
+    )
+
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+
+    # Handle deep link verification: /start verify_<user_id>_<token>
+    if context.args and context.args[0].startswith("verify_"):
+        parts = context.args[0].split("_", 2)
+        if len(parts) == 3:
+            _, uid_str, token = parts
+            if uid_str == str(user.id):
+                if mark_verified(user.id, token):
+                    expiry_mins = VERIFICATION_EXPIRY_SECONDS // 60
+                    await update.message.reply_text(
+                        f"✅ *Verification Successful!*\n\n"
+                        f"Access granted for *{expiry_mins} minutes*.\n"
+                        f"You can now use `/rec`.",
+                        parse_mode=ParseMode.MARKDOWN
+                    )
+                else:
+                    await update.message.reply_text(
+                        "❌ *Verification failed.*\n"
+                        "The link has expired or is invalid. Run `/verify` again.",
+                        parse_mode=ParseMode.MARKDOWN
+                    )
+            else:
+                await update.message.reply_text("❌ This verification link is not intended for you.")
             return
 
-        if rc != 0:
-            err  = (await proc.stderr.read()).decode(errors="ignore")
-            tail = err[-1500:] if len(err) > 1500 else err
-            raise Exception(f"FFmpeg exit {rc}\n{tail}")
-        if not os.path.exists(out_path) or os.path.getsize(out_path) == 0:
-            raise Exception("Output file missing or empty.")
+    role = get_user_role(user.id)
+    role_icon = {"owner": "👑", "admin": "👨\u200d✈\ufe0f", "user": "👤"}[role]
 
-        thumb     = join(save_dir, "thumb.jpg")
-        thumb_at  = max(1, min(int(duration / 2), int(duration) - 1))
-        await runcmd(f'ffmpeg -hide_banner -loglevel error -nostats -y '
-                     f'-ss {thumb_at} -i {shlex.quote(out_path)} '
-                     f'-vframes 1 -q:v 2 {shlex.quote(thumb)}')
-        thumb_path   = thumb if os.path.exists(thumb) else None
-        out_size_mb  = os.path.getsize(out_path) / (1024 * 1024)
-        retention_note = (f"_The video is automatically deleted from the server after "
-                          f"{_retention_label()}._")
-        caption = (f"🎬 **{BRAND_TITLE}**\n\n"
-                   f"Compressed: `{out_size_mb:.1f} MB` (target `{target_mb} MB`)\n"
-                   f"Duration: `{TimeFormatter(int(duration * 1000))}`\n"
-                   f"Resolution / codec: `{res_cfg['label']}`\n"
-                   f"Audio: `{', '.join(LANG_LABEL.get(l, l.upper()) for l in langs)}`\n"
-                   f"{retention_note}")
-
-        _dest = await _await_upload_choice(
-            user_id, status_msg,
-            f"Compressed: `{out_size_mb:.1f} MB` (target `{target_mb} MB`)"
+    text = (
+        f"{role_icon} *DishTV Airtel Sunnxt ReBorn Bot*\n"
+        f"Role: `{role.upper()}` | User: `{user.first_name}`\n\n"
+        "*Commands:*\n"
+        "🎞️ `/Qualitymax` — Convert the quality of a replied video\n"
+        "🛡 `/verify` — Unlock access for 40 minutes\n"
+        "📼 `/rec <channel> MM:SS` or `-t HH:MMAM - HH:MMPM`\n"
+        "📡 Airtel: `/rec -airtel <channel> HH:MM:SS`\n"
+         "📡 Sunnxt: `/rec -sunnxt <channel> HH:MM:SS`\n"
+        "📋 `/channels` — Channels list\n"
+        "🔍 `/search <name>` — Channel search\n"
+        "ℹ\ufe0f `/myinfo` — View your account information\n"
+        "\n━━━━━━━━━━━━━━━━━━━━━━━\n"
+        "🍪 *Cookies (OTT Login)*\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        "❌ Free Users: Not Allowed\n"
+        "✅ Verify / Premium / Admin / Owner: Allowed\n\n"
+        "• `/set_cookies` — Upload cookies.txt (Netscape format)\n"
+        "• `/cookies_status` — Show stored cookies\n"
+        "• `/del_cookies` — Delete stored cookies\n"
+    )
+    if role in ("owner", "admin"):
+        text += "📢 `/broadcast <msg>` — Send a message to all users\n"
+    if role == "owner":
+        text += (
+            "\n*Owner Commands:*\n"
+            "🔑 `/login <mobile>` — Owner DishTV login\n"
+            "🔐 `/otp <code>` — Verify the owner OTP\n"
+            "🔢 `/addadmin <user_id>` — Admin add\n"
+            "🗑 `/removeadmin <user_id>` — Admin remove\n"
+            "👥 `/adminlist` — Admin list\n"
+            "🌐 `/proxy` — Proxy URL (hidden)\n"
+            "💾 `/setowner <user_id>` — Owner set\n"
         )
-        if _dest != "cancel":
-            await _run_upload_destination(
-                client, user_id, _dest, status_msg, out_path, caption, duration,
-                thumb_path=thumb_path, save_dir=save_dir,
-            )
-        if save_dir and os.path.exists(save_dir):
-            schedule_retention_cleanup(save_dir)
-    except Exception as e:
-        LOG.error(f"Compress failed uid={user_id}: {e}")
+    text += (
+        "\n*Example:*\n"
+        "`/rec Pogo 01:00` ya `/rec Pogo -t 12:00PM - 01:00PM`\n"
+         "`/rec -airtel Pogo 00:00:30 -t 00:00:30`\n"
+         "`/rec -sunnxt Sony SAB 00:00:30`"
+    )
+    await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
+
+
+async def myinfo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    role = get_user_role(user.id)
+    creds = load_credentials()
+
+    jio_mobile = "❌ Not logged in"
+    expiry = "N/A"
+    if creds:
         try:
-            err_text = str(e)
-            if len(err_text) > 3500: err_text = "...[truncated]...\n" + err_text[-3500:]
-            await status_msg.edit_text(f"❌ **Compress failed.**\n\n`{err_text}`")
-        except Exception: pass
-        if save_dir and os.path.exists(save_dir):
-            _safe_rmtree(save_dir)
-    finally:
-        compress_jobs.pop(user_id, None)
-        user_status.pop(user_id, None)
-        user_tasks.pop(user_id, None)
-        user_ffmpeg_pids.pop(user_id, None)
-        progress_tasks.pop(user_id, None)
-        cancelled_users.discard(user_id)
+            mobile = creds.get("sessionAttributes", {}).get("user", {}).get("mobile", "")
+            name = creds.get("sessionAttributes", {}).get("user", {}).get("commonName", "")
+            jio_mobile = f"{name} ({mobile})"
+            jwt = creds.get("authToken", "")
+            if jwt:
+                parts = jwt.split(".")
+                if len(parts) > 1:
+                    payload = json.loads(base64.b64decode(parts[1] + "=" * (-len(parts[1]) % 4)))
+                    exp = payload.get("exp", 0)
+                    exp_dt = datetime.fromtimestamp(exp, tz=IST)
+                    expiry = exp_dt.strftime("%d-%b-%Y %I:%M %p")
+        except Exception:
+            pass
 
-# ---------------------------------------------------------------------------
-# Reclink (headless Chromium)
-# ---------------------------------------------------------------------------
+    text = (
+        f"👤 *User Info*\n"
+        f"Name: `{user.first_name}`\n"
+        f"ID: `{user.id}`\n"
+        f"Role: `{role.upper()}`\n"
+        f"Username: @{user.username or 'N/A'}\n\n"
+        f"📱 *DishTV Status*\n"
+        f"Mobile: `{jio_mobile}`\n"
+        f"Token Expiry: `{expiry}`"
+    )
+    await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
 
-def _resolve_chromium_path() -> Optional[str]:
-    env_path = os.environ.get("CHROMIUM_PATH") or os.environ.get("PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH")
-    if env_path and os.path.exists(env_path):
-        return env_path
-    for name in ("chromium", "chromium-browser", "google-chrome", "chrome"):
-        p = shutil.which(name)
-        if p:
-            return p
+
+@owner_only
+async def login_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await update.message.reply_text("❌ Usage: `/login <10-digit mobile>`", parse_mode=ParseMode.MARKDOWN)
+        return
+
+    mobile = context.args[0].strip()
+    if not re.match(r"^\d{10}$", mobile):
+        await update.message.reply_text("❌ Enter a 10-digit mobile number. Example: `/login 9876543210`", parse_mode=ParseMode.MARKDOWN)
+        return
+
+    msg = await update.message.reply_text(f"🔑 Sending an OTP to *{mobile}*...", parse_mode=ParseMode.MARKDOWN)
+
+    result = send_jio_otp_api(mobile)
+
+    if result["status"] == "success":
+        user_data = get_user_data()
+        user_data[str(update.effective_user.id)] = {
+            "mobile": mobile,
+            "pending": True,
+            "login_time": datetime.now(IST).isoformat()
+        }
+        save_user_data(user_data)
+        await msg.edit_text(
+            f"✅ OTP sent to *{mobile}*.\n"
+            f"Now verify it with `/otp <6-digit code>`.",
+            parse_mode=ParseMode.MARKDOWN
+        )
+    else:
+        await msg.edit_text(f"❌ OTP fail: {result['message']}")
+
+
+@owner_only
+async def otp_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await update.message.reply_text("❌ Usage: `/otp <6-digit code>`", parse_mode=ParseMode.MARKDOWN)
+        return
+
+    otp = context.args[0].strip()
+    if not re.match(r"^\d{6}$", otp):
+        await update.message.reply_text("❌ Enter a 6-digit OTP. Example: `/otp 123456`", parse_mode=ParseMode.MARKDOWN)
+        return
+
+    user_data = get_user_data()
+    user_entry = user_data.get(str(update.effective_user.id))
+    if not user_entry or not user_entry.get("pending"):
+        await update.message.reply_text("❌ Request an OTP first with `/login <mobile>`.", parse_mode=ParseMode.MARKDOWN)
+        return
+
+    mobile = user_entry["mobile"]
+    msg = await update.message.reply_text("🔐 Verifying OTP...")
+
+    result = verify_jio_otp_api(mobile, otp)
+
+    if result["status"] == "success":
+        user_entry["pending"] = False
+        user_entry["verified"] = True
+        user_entry.pop("login_time", None)
+        save_user_data(user_data)
+        await msg.edit_text("✅ *JioTV login successful!*\nYou can now use `/live` or `/rec`.", parse_mode=ParseMode.MARKDOWN)
+        # Remove the OTP command from the chat when Telegram allows deletion.
+        try:
+            await update.message.delete()
+        except Exception:
+            pass
+    else:
+        await msg.edit_text(f"❌ Verification failed: {result['message']}\nTry again with `/otp <code>`.", parse_mode=ParseMode.MARKDOWN)
+
+
+def _quality_source_from_message(message):
+    """Return Telegram file metadata for a replied video or video document."""
+    if not message:
+        return None
+    if message.video:
+        return {
+            "file_id": message.video.file_id,
+            "file_name": message.video.file_name or "video.mp4",
+            "file_size": message.video.file_size or 0,
+        }
+    if message.document:
+        mime = (message.document.mime_type or "").lower()
+        name = message.document.file_name or "video.mp4"
+        if mime.startswith("video/") or name.lower().endswith(
+            (".mp4", ".mkv", ".mov", ".webm", ".avi", ".ts")
+        ):
+            return {
+                "file_id": message.document.file_id,
+                "file_name": name,
+                "file_size": message.document.file_size or 0,
+            }
     return None
 
 
-def _looks_like_master_playlist(url: str) -> bool:
-    u = url.lower()
-    return ".m3u8" in u and any(k in u for k in ("master", "index", "playlist", "manifest"))
-
-
-async def _extract_streams_with_chromium(page_url: str, timeout_sec: int = 30, log_cb=None) -> dict:
-    from playwright.async_api import async_playwright
-    log: list = []
-    def L(msg: str):
-        log.append(msg)
-        if log_cb:
-            try: log_cb(msg)
-            except Exception: pass
-
-    chromium_path = _resolve_chromium_path()
-    L(f"Using Chromium: `{chromium_path or 'playwright default'}`")
-    seen: dict = {}
-
-    async with async_playwright() as p:
-        launch_kwargs = {
-            "headless": True,
-            "args": ["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu",
-                     "--disable-blink-features=AutomationControlled", "--mute-audio"],
-        }
-        if chromium_path:
-            launch_kwargs["executable_path"] = chromium_path
-        try:
-            browser = await p.chromium.launch(**launch_kwargs)
-        except Exception as e:
-            raise Exception(f"Could not launch Chromium: {e}")
-
-        context = await browser.new_context(
-            user_agent=("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-                        "(KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36"),
-            viewport={"width": 1280, "height": 720}, ignore_https_errors=True,
+async def qualitymax_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show output-quality buttons for a replied Telegram video."""
+    now = time.time()
+    for token, item in list(QUALITY_PENDING.items()):
+        if now - item.get("created_at", 0) > QUALITY_PENDING_TTL:
+            QUALITY_PENDING.pop(token, None)
+    source = _quality_source_from_message(update.message.reply_to_message)
+    if not source:
+        await update.message.reply_text(
+            "❌ Reply to a video or video document with `/Qualitymax`.",
+            parse_mode=ParseMode.MARKDOWN,
         )
-        page = await context.new_page()
+        return
 
-        def on_request(req):
-            try:
-                u = req.url
-                if ".m3u8" in u.lower() or ".mpd" in u.lower():
-                    if u not in seen:
-                        seen[u] = (dict(req.headers), _looks_like_master_playlist(u))
-                        L(f"📡 captured `{u[:90]}{'…' if len(u) > 90 else ''}`")
-            except Exception: pass
+    if source["file_size"] and source["file_size"] > TELEGRAM_BOT_DOWNLOAD_LIMIT:
+        size_mb = source["file_size"] / (1024 * 1024)
+        await update.message.reply_text(
+            f"❌ Source video is {size_mb:.1f} MB.\n\n"
+            f"In this Telegram Bot API setup, files larger than {telegram_limit_text()} cannot be downloaded.\n"
+            f"Reduce the video below {telegram_limit_text()} and send it again, "
+            "then reply to it with `/Qualitymax`.",
+        )
+        return
 
-        page.on("request", on_request)
-        try:
-            L(f"Opening page (timeout {timeout_sec}s)...")
-            try:
-                await page.goto(page_url, wait_until="domcontentloaded", timeout=timeout_sec * 1000)
-            except Exception as nav_err:
-                L(f"goto warn: {nav_err}")
-            await page.wait_for_timeout(3500)
-            for sel in ["button[aria-label*='play' i]", "button[title*='play' i]",
-                        ".vjs-big-play-button", ".plyr__control--overlaid", ".jw-icon-display",
-                        ".play-button", ".play-btn", "[class*='play' i][class*='button' i]", "video"]:
-                try:
-                    el = await page.query_selector(sel)
-                    if el:
-                        await el.click(timeout=1500, force=True)
-                        L(f"clicked `{sel}`")
-                        await page.wait_for_timeout(1500)
-                        if seen: break
-                except Exception: pass
-            await page.wait_for_timeout(2500)
-            page_title = await page.title()
-            final_url  = page.url
-        finally:
-            try: await browser.close()
-            except Exception: pass
-
-    streams = [{"url": u, "headers": h, "is_master": m} for u, (h, m) in seen.items()]
-    streams.sort(key=lambda s: (not s["is_master"], len(s["url"])))
-    L(f"Done. Found {len(streams)} stream(s).")
-    return {"streams": streams, "page_title": page_title, "final_url": final_url, "log": log}
-
-# ---------------------------------------------------------------------------
-# Screenshot helpers
-# ---------------------------------------------------------------------------
-
-SS_MIN, SS_MAX, SS_PER_ROW = 1, 30, 5
-
-
-def _ss_menu() -> InlineKeyboardMarkup:
-    buttons = [InlineKeyboardButton(str(n), callback_data=f"ss:n:{n}")
-               for n in range(SS_MIN, SS_MAX + 1)]
-    rows = [buttons[i:i + SS_PER_ROW] for i in range(0, len(buttons), SS_PER_ROW)]
-    rows.append([InlineKeyboardButton("✖ Cancel", callback_data="ss:cancel")])
-    return InlineKeyboardMarkup(rows)
-
-
-def _ss_menu_text(state: dict) -> str:
-    duration = state.get("duration", 0)
-    h        = state.get("video_height", 0)
-    return (f"**📸 Screenshot Generator**\n\nSource: `{TimeFormatter(int(duration * 1000))}` • `{h}p`\n\n"
-            f"**Select the number of screenshots**\n\n"
-            f"✶ Click the Button of your choice 👇 {SS_MIN} to {SS_MAX}")
-
-
-async def run_screenshots(client: Client, status_msg: Message, state: dict, n: int):
-    user_id  = state["user_id"]
-    save_dir = state["save_dir"]
-    src      = state["src_path"]
-    duration = state["duration"]
-
-    user_tasks[user_id]  = time.time()
-    user_status[user_id] = {"id": int(user_tasks[user_id]), "user_id": user_id,
-                            "filename": f"screenshots-{n}",
-                            "duration_str": TimeFormatter(int(duration * 1000)),
-                            "channel_name": "Screenshots", "url": "(local)", "progress": "0%"}
-    try:
-        try: await status_msg.edit_text(f"📸 Generating **{n}** screenshot{'s' if n != 1 else ''}...",
-                                        reply_markup=None)
-        except Exception: pass
-
-        edge      = max(1.0, duration * 0.02)
-        usable    = max(1.0, duration - 2 * edge)
-        timestamps = ([duration / 2] if n == 1
-                      else [edge + i * (usable / (n - 1)) for i in range(n)])
-
-        produced: list = []
-        for idx, ts in enumerate(timestamps, 1):
-            if user_id in cancelled_users: break
-            out = join(save_dir, f"shot_{idx:02d}.jpg")
-            cmd = (f"ffmpeg -hide_banner -loglevel error -nostats -y "
-                   f"-ss {ts:.2f} -i {shlex.quote(src)} -vframes 1 -q:v 2 {shlex.quote(out)}")
-            rc, _o, err = await runcmd(cmd)
-            if rc == 0 and os.path.exists(out) and os.path.getsize(out) > 0:
-                produced.append((out, ts))
-            else:
-                LOG.warning(f"ss frame {idx} failed: {err.strip()[:200]}")
-            pct = idx / n * 100
-            if user_status.get(user_id): user_status[user_id]["progress"] = f"{pct:.0f}%"
-            if idx % max(1, n // 6) == 0 or idx == n:
-                try: await status_msg.edit_text(f"📸 Generating **{n}** screenshot{'s' if n != 1 else ''}...\n"
-                                                f"`{idx}` / `{n}` done")
-                except Exception: pass
-
-        if user_id in cancelled_users:
-            try: await status_msg.edit_text("Screenshot job cancelled.")
-            except Exception: pass
-            _safe_rmtree(save_dir)
-            return
-        if not produced:
-            raise Exception("FFmpeg produced no images.")
-
-        try: await status_msg.edit_text(f"📤 Uploading {len(produced)} image(s)...")
-        except Exception: pass
-
-        first = True
-        for chunk_start in range(0, len(produced), 10):
-            chunk = produced[chunk_start:chunk_start + 10]
-            media = []
-            for i, (path, ts) in enumerate(chunk):
-                global_idx = chunk_start + i + 1
-                cap = (f"🎬 **{BRAND_TITLE}**\n\n"
-                       f"📸 `{len(produced)}` screenshot{'s' if len(produced) != 1 else ''} • "
-                       f"video `{TimeFormatter(int(duration * 1000))}`"
-                       if first and i == 0
-                       else f"`{global_idx:02d}` • `{TimeFormatter(int(ts * 1000))}`")
-                media.append(InputMediaPhoto(media=path, caption=cap))
-            await status_msg.reply_media_group(media=media)
-            first = False
-
-        try: await status_msg.edit_text(f"✅ Done — sent `{len(produced)}` screenshot"
-                                        f"{'s' if len(produced) != 1 else ''}.\n"
-                                        f"Server copy auto-deletes in {_retention_label()}.")
-        except Exception: pass
-        if save_dir and os.path.exists(save_dir): schedule_retention_cleanup(save_dir)
-    except Exception as e:
-        LOG.error(f"Screenshot job failed uid={user_id}: {e}")
-        try:
-            err_text = str(e)
-            if len(err_text) > 2500: err_text = "...[truncated]...\n" + err_text[-2500:]
-            await status_msg.edit_text(f"❌ **Screenshot failed.**\n\n`{err_text}`")
-        except Exception: pass
-        if save_dir and os.path.exists(save_dir): _safe_rmtree(save_dir)
-    finally:
-        ss_jobs.pop(user_id, None)
-        user_status.pop(user_id, None)
-        user_tasks.pop(user_id, None)
-        progress_tasks.pop(user_id, None)
-        cancelled_users.discard(user_id)
-
-# ---------------------------------------------------------------------------
-# Merge helpers
-# ---------------------------------------------------------------------------
-
-MERGE_MAX_VIDEOS  = 20
-MERGE_SESSION_TTL = 30 * 60
-
-
-def _merge_session_status(sess: dict) -> str:
-    parts     = sess["videos"]
-    total_dur = sum(p["duration"] for p in parts)
-    lines = [f"🧩 **Merge session active** — `{len(parts)}` / `{MERGE_MAX_VIDEOS}` videos collected.",
-             f"Total so far: `{TimeFormatter(int(total_dur * 1000))}`", ""]
-    for i, p in enumerate(parts, 1):
-        lines.append(f"`{i:02d}.` `{TimeFormatter(int(p['duration'] * 1000))}` • "
-                     f"`{p.get('height') or '?'}p` • {p['codec_v']}")
-    lines += ["", "Send more videos in order, then `/merge_done` to combine.",
-              "Use `/merge_cancel` to discard."]
-    return "\n".join(lines)
-
-
-def _all_streams_compatible(videos: list) -> bool:
-    if not videos: return False
-    base = videos[0]
-    for v in videos[1:]:
-        if (v["codec_v"] != base["codec_v"] or v["codec_a"] != base["codec_a"]
-                or v["height"] != base["height"] or v["width"] != base["width"]):
-            return False
-    return True
-
-
-async def run_merge(client: Client, message: Message, sess: dict):
-    user_id   = message.from_user.id
-    save_dir  = sess["save_dir"]
-    videos    = sess["videos"]
-    out_path  = join(save_dir, f"merged_{int(time.time())}.mkv")
-    total_dur = sum(v["duration"] for v in videos)
-
-    user_tasks[user_id]  = time.time()
-    user_status[user_id] = {"id": int(user_tasks[user_id]), "user_id": user_id,
-                            "filename": os.path.basename(out_path),
-                            "duration_str": TimeFormatter(int(total_dur * 1000)),
-                            "channel_name": "Merge", "url": "(local)", "progress": "0%"}
-    status = await message.reply_text(
-        f"🧩 **Merging `{len(videos)}` videos** (`{TimeFormatter(int(total_dur * 1000))}` total)..."
-    )
-    try:
-        compatible  = _all_streams_compatible(videos)
-        used_method = None
-
-        if compatible:
-            list_path = join(save_dir, "concat_list.txt")
-            with open(list_path, "w") as f:
-                for v in videos:
-                    safe = v["path"].replace("'", "'\\''")
-                    f.write(f"file '{safe}'\n")
-            await status.edit_text("🧩 Streams are compatible — using **fast** concat (lossless)...")
-            rc, _o, err = await runcmd(
-                f'ffmpeg -hide_banner -loglevel error -nostats -y '
-                f'-f concat -safe 0 -i {shlex.quote(list_path)} -c copy {shlex.quote(out_path)}'
-            )
-            if rc == 0 and os.path.exists(out_path) and os.path.getsize(out_path) > 0:
-                used_method = "fast (stream copy)"
-            else:
-                LOG.warning(f"concat demuxer failed, falling back: {err.strip()[:300]}")
-
-        if not used_method:
-            await status.edit_text(f"🧩 Re-encoding `{len(videos)}` videos (slower but always works)...")
-            inputs = []
-            for v in videos: inputs += ["-i", v["path"]]
-            n = len(videos)
-            # Use minimum audio stream count across all videos for safe concat
-            num_audio = min(
-                (max(1, len(v.get("audio_streams", []))) for v in videos),
-                default=1
-            )
-            seg_inputs = "".join(
-                f"[{i}:v:0]" + "".join(f"[{i}:a:{j}]" for j in range(num_audio))
-                for i in range(n)
-            )
-            out_labels = "[outv]" + "".join(f"[outa{j}]" for j in range(num_audio))
-            filter_complex = (seg_inputs
-                              + f"concat=n={n}:v=1:a={num_audio}"
-                              + out_labels)
-            map_args = ["-map", "[outv]"] + [item for j in range(num_audio) for item in ("-map", f"[outa{j}]")]
-            args = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-nostats", "-y",
-                    *inputs, "-filter_complex", filter_complex,
-                    *map_args,
-                    "-c:v", "libx264", "-preset", "veryfast", "-crf", "21",
-                    "-c:a", "aac", "-b:a", "128k", out_path]
-            proc = await asyncio.create_subprocess_exec(
-                *args, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-            )
-            user_ffmpeg_pids[user_id] = proc.pid
-            rc = await proc.wait()
-            user_ffmpeg_pids.pop(user_id, None)
-            err_out = (await proc.stderr.read()).decode(errors="ignore")
-            if rc != 0 or not os.path.exists(out_path) or os.path.getsize(out_path) == 0:
-                raise Exception(f"FFmpeg merge (re-encode) failed.\n{err_out[-1500:]}")
-            used_method = "re-encode (h264/aac)"
-
-        thumb    = join(save_dir, "thumb.jpg")
-        thumb_at = max(1, min(int(total_dur / 2), int(total_dur) - 1))
-        await runcmd(f'ffmpeg -hide_banner -loglevel error -nostats -y '
-                     f'-ss {thumb_at} -i {shlex.quote(out_path)} '
-                     f'-vframes 1 -q:v 2 {shlex.quote(thumb)}')
-        thumb_path   = thumb if os.path.exists(thumb) else None
-        out_size_mb  = os.path.getsize(out_path) / (1024 * 1024)
-        retention_note = (f"_The video is automatically deleted from the server after "
-                          f"{_retention_label()}._")
-        caption = (f"🎬 **{BRAND_TITLE}**\n\n"
-                   f"🧩 Merged `{len(videos)}` videos\nDuration: `{TimeFormatter(int(total_dur * 1000))}`\n"
-                   f"Size: `{out_size_mb:.1f} MB`\nMethod: `{used_method}`\n"
-                   f"{retention_note}")
-
-        _dest = await _await_upload_choice(user_id, status, f"Merged: `{out_size_mb:.1f} MB`")
-        if _dest != "cancel":
-            await _run_upload_destination(
-                client, user_id, _dest, status, out_path, caption, total_dur,
-                thumb_path=thumb_path, save_dir=save_dir,
-            )
-        if save_dir and os.path.exists(save_dir): schedule_retention_cleanup(save_dir)
-    except Exception as e:
-        LOG.error(f"Merge failed: {e}")
-        try:
-            if is_owner(user_id) or is_admin(user_id):
-                err_text = str(e)
-                if len(err_text) > 2500: err_text = "...[truncated]...\n" + err_text[-2500:]
-                await status.edit_text(f"**Merge failed.**\n\n`{err_text}`")
-            else:
-                await status.edit_text("❌ **Merge failed.**\n\nCould not merge the videos. Please try again.")
-        except Exception: pass
-        if save_dir and os.path.exists(save_dir): _safe_rmtree(save_dir)
-    finally:
-        merge_sessions.pop(user_id, None)
-        user_status.pop(user_id, None)
-        user_tasks.pop(user_id, None)
-        user_ffmpeg_pids.pop(user_id, None)
-        progress_tasks.pop(user_id, None)
-        cancelled_users.discard(user_id)
-
-# ---------------------------------------------------------------------------
-# Upload progress callback (shared by all upload calls)
-# ---------------------------------------------------------------------------
-
-# ---------------------------------------------------------------------------
-# /title — burn a text overlay onto a replied video
-# ---------------------------------------------------------------------------
-
-TITLE_POS_MAP = {
-    "tl": ("↖️ Top-Left",     "x=10:y=10"),
-    "tc": ("⬆️ Top-Center",   "x=(w-tw)/2:y=10"),
-    "tr": ("↗️ Top-Right",    "x=w-tw-10:y=10"),
-    "cc": ("⊙ Center",        "x=(w-tw)/2:y=(h-th)/2"),
-    "bl": ("↙️ Bottom-Left",  "x=10:y=h-th-10"),
-    "bc": ("⬇️ Bottom-Center","x=(w-tw)/2:y=h-th-10"),
-    "br": ("↘️ Bottom-Right", "x=w-tw-10:y=h-th-10"),
-}
-
-# Videos >= this many seconds get "no title in last 3 minutes" treatment.
-_TITLE_LONG_VIDEO_SEC  = 46 * 60   # 2760 s
-_TITLE_FADE_BEFORE_SEC = 3  * 60   # 180 s
-
-
-def _title_kb(uid: int) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("↖️ Top-Left",     callback_data=f"ti:{uid}:pos:tl"),
-         InlineKeyboardButton("⬆️ Top-Center",   callback_data=f"ti:{uid}:pos:tc"),
-         InlineKeyboardButton("↗️ Top-Right",    callback_data=f"ti:{uid}:pos:tr")],
-        [InlineKeyboardButton("⊙ Center",        callback_data=f"ti:{uid}:pos:cc")],
-        [InlineKeyboardButton("↙️ Bottom-Left",  callback_data=f"ti:{uid}:pos:bl"),
-         InlineKeyboardButton("⬇️ Bottom-Center",callback_data=f"ti:{uid}:pos:bc"),
-         InlineKeyboardButton("↘️ Bottom-Right", callback_data=f"ti:{uid}:pos:br")],
-        [InlineKeyboardButton("❌ Cancel",        callback_data=f"ti:{uid}:cancel")],
-    ])
-
-
-def _title_menu_text(state: dict) -> str:
-    dur   = state["duration"]
-    h     = state.get("video_height", 0)
-    text  = state["title_text"]
-    note  = ""
-    if dur >= _TITLE_LONG_VIDEO_SEC:
-        note = (f"\n\n⚠️ Video is `{TimeFormatter(int(dur*1000))}` long — "
-                f"title will **not** appear in the last **3 minutes**.")
-    return (f"**🔤 Title Overlay**\n\n"
-            f"Source: `{TimeFormatter(int(dur*1000))}` • `{h}p`\n"
-            f"Text: `{text[:60]}{'…' if len(text)>60 else ''}`{note}\n\n"
-            f"**Choose text position:**")
-
-
-async def run_title(client: Client, status_msg: Message, state: dict, pos_key: str):
-    user_id  = state["user_id"]
-    save_dir = state["save_dir"]
-    src      = state["src_path"]
-    duration = state["duration"]
-    raw_text = state["title_text"]
-    out_path = join(save_dir, f"titled_{int(time.time())}.mkv")
-
-    user_tasks[user_id]  = time.time()
-    user_status[user_id] = {
-        "id":            int(user_tasks[user_id]),
-        "user_id":       user_id,
-        "filename":      os.path.basename(out_path),
-        "duration_str":  TimeFormatter(int(duration * 1000)),
-        "channel_name":  "Title",
-        "url":           "(local)",
-        "progress":      "0%",
+    token = _secrets.token_hex(6)
+    QUALITY_PENDING[token] = {
+        "user_id": update.effective_user.id,
+        "chat_id": update.effective_chat.id,
+        "file_id": source["file_id"],
+        "file_name": source["file_name"],
+        "created_at": time.time(),
     }
-
-    pos_label, xy = TITLE_POS_MAP[pos_key]
-
-    # Escape text for FFmpeg drawtext (backslash → \\, colon → \:, quote → \')
-    safe_text = (raw_text
-                 .replace("\\", "\\\\")
-                 .replace(":",   "\\:")
-                 .replace("'",   "\\'"))
-
-    # For long videos: title disappears 3 minutes before the end
-    if duration >= _TITLE_LONG_VIDEO_SEC:
-        end_ts     = max(0.0, duration - _TITLE_FADE_BEFORE_SEC)
-        enable_str = f":enable='lt(t,{end_ts:.1f})'"
-    else:
-        enable_str = ""
-
-    vf = (f"drawtext=text='{safe_text}'"
-          f":fontsize=36:fontcolor=white"
-          f":box=1:boxcolor=black@0.45:boxborderw=5"
-          f":{xy}{enable_str}")
-
-    try:
-        try:
-            await status_msg.edit_text(
-                f"🔤 Burning title overlay…\n\n"
-                f"Position: {pos_label}\n"
-                f"Text: `{raw_text[:60]}`\n"
-                f"Re-encoding video — this may take a while.",
-                reply_markup=None,
-            )
-        except Exception:
-            pass
-
-        args = [
-            "ffmpeg", "-hide_banner", "-loglevel", "error", "-nostats",
-            "-progress", "pipe:1", "-y",
-            "-i", src,
-            "-vf", vf,
-            "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
-            "-c:a", "copy",
-            out_path,
-        ]
-        proc = await asyncio.create_subprocess_exec(
-            *args,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        user_ffmpeg_pids[user_id] = proc.pid
-
-        progress_state = {"out_time_us": 0, "speed": 1.0}
-
-        async def _read_prog():
-            while True:
-                line = await proc.stdout.readline()
-                if not line:
-                    return
-                txt = line.decode(errors="ignore").strip()
-                if "=" not in txt:
-                    continue
-                k, v = txt.split("=", 1)
-                if k == "out_time_us":
-                    try: progress_state["out_time_us"] = int(v)
-                    except ValueError: pass
-                elif k == "speed" and v not in ("N/A", ""):
-                    try: progress_state["speed"] = float(v.rstrip("x"))
-                    except ValueError: pass
-
-        async def _render_prog():
-            last = ""
-            while proc.returncode is None:
-                if user_id in cancelled_users:
-                    return
-                done_sec  = progress_state["out_time_us"] / 1_000_000
-                pct       = min(100.0, done_sec / max(1, duration) * 100)
-                bar_len   = 20
-                filled    = max(0, min(bar_len, int(round(pct / 100 * bar_len))))
-                bar       = "●" * filled + "○" * (bar_len - filled)
-                spd       = progress_state["speed"]
-                remaining = max(0.0, (duration - done_sec) / max(0.05, spd))
-                txt       = (f"🔤 **Burning title…**\n\n"
-                             f"`{bar}` `{pct:5.1f}%`\n"
-                             f"⚡ Speed: `{spd:.2f}x`\n"
-                             f"⏳ ETA: `{TimeFormatter(int(remaining * 1000))}`")
-                if txt != last:
-                    try:
-                        await status_msg.edit_text(txt)
-                        last = txt
-                        if user_status.get(user_id):
-                            user_status[user_id]["progress"] = f"{pct:.1f}%"
-                    except Exception:
-                        pass
-                await asyncio.sleep(10)
-
-        prog_reader   = asyncio.create_task(_read_prog())
-        prog_renderer = asyncio.create_task(_render_prog())
-        progress_tasks[user_id] = prog_renderer
-
-        rc = await proc.wait()
-        prog_reader.cancel()
-        prog_renderer.cancel()
-        user_ffmpeg_pids.pop(user_id, None)
-
-        if user_id in cancelled_users:
-            try: await status_msg.edit_text("Title overlay cancelled.")
-            except Exception: pass
-            _safe_rmtree(save_dir)
-            return
-
-        if rc != 0 or not os.path.exists(out_path) or os.path.getsize(out_path) == 0:
-            err = (await proc.stderr.read()).decode(errors="ignore")
-            tail = err[-1500:] if len(err) > 1500 else err
-            raise Exception(f"FFmpeg exit {rc}\n{tail}")
-
-        # Thumbnail
-        thumb    = join(save_dir, "thumb.jpg")
-        thumb_at = max(1, min(int(duration / 2), int(duration) - 1))
-        await runcmd(f'ffmpeg -hide_banner -loglevel error -nostats -y '
-                     f'-ss {thumb_at} -i {shlex.quote(out_path)} '
-                     f'-vframes 1 -q:v 2 {shlex.quote(thumb)}')
-        thumb_path  = thumb if os.path.exists(thumb) else None
-        out_size_mb = os.path.getsize(out_path) / (1024 * 1024)
-
-        long_note = (f"\n_Title disappears in the last 3 min (video > 46 min)._"
-                     if duration >= _TITLE_LONG_VIDEO_SEC else "")
-        retention_note = (f"_Auto-deleted from server after {_retention_label()}._")
-        caption = (f"🎬 **{BRAND_TITLE}**\n\n"
-                   f"🔤 Title: `{raw_text[:80]}`\n"
-                   f"📌 Position: `{pos_label}`\n"
-                   f"⏱ Duration: `{TimeFormatter(int(duration * 1000))}`\n"
-                   f"💾 Size: `{out_size_mb:.1f} MB`\n"
-                   f"{long_note}\n\n"
-                   f"{retention_note}")
-
-        upload_start = time.time()
-        await split_and_send_video(
-            status_msg, out_path, caption, int(duration),
-            thumb_path=thumb_path,
-            status_msg=status_msg,
-            progress=progress_for_pyrogram,
-            progress_args=(status_msg, upload_start, status_msg, save_dir, False),
-            _uid=user_id, _chat_id=status_msg.chat.id,
-        )
-        asyncio.create_task(upload_and_notify(
-            client, status_msg.chat.id, out_path, os.path.basename(out_path)
-        ))
-        try:
-            await status_msg.edit_text(
-                f"✅ Title overlay done — uploaded `{out_size_mb:.1f} MB`.\n"
-                f"Server copy auto-deletes in {_retention_label()}."
-            )
-        except Exception:
-            pass
-        if save_dir and os.path.exists(save_dir):
-            schedule_retention_cleanup(save_dir)
-
-    except Exception as e:
-        LOG.error(f"run_title failed uid={user_id}: {e}")
-        err_text = str(e)
-        if len(err_text) > 2500:
-            err_text = "...[truncated]...\n" + err_text[-2500:]
-        try: await status_msg.edit_text(f"**Title overlay failed.**\n\n`{err_text}`")
-        except Exception: pass
-        if save_dir and os.path.exists(save_dir):
-            _safe_rmtree(save_dir)
-    finally:
-        title_jobs.pop(user_id, None)
-        user_status.pop(user_id, None)
-        user_tasks.pop(user_id, None)
-        user_ffmpeg_pids.pop(user_id, None)
-        progress_tasks.pop(user_id, None)
-        cancelled_users.discard(user_id)
+    keyboard = [
+        [
+            InlineKeyboardButton("140p", callback_data=f"qualitymax:{token}:140"),
+            InlineKeyboardButton("240p", callback_data=f"qualitymax:{token}:240"),
+            InlineKeyboardButton("480p", callback_data=f"qualitymax:{token}:480"),
+        ],
+        [
+            InlineKeyboardButton("720p", callback_data=f"qualitymax:{token}:720"),
+            InlineKeyboardButton("1080p", callback_data=f"qualitymax:{token}:1080"),
+        ],
+    ]
+    await update.message.reply_text(
+        "🎞️ *Select the output quality:*\n"
+        f"`{source['file_name']}`\n\n"
+        "The video will be converted to the selected quality and uploaded to Telegram.",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode=ParseMode.MARKDOWN,
+    )
 
 
-_progress_last_edit: dict = {}   # msg_id -> last edit timestamp
-_PROGRESS_THROTTLE_SEC = 8      # minimum seconds between progress edits
-
-# Per-message edit queues — ensures edits land in order, only latest pending wins.
-# Key: id(msg)  Value: asyncio.Queue of (text | None) — None is a sentinel to stop the worker.
-_edit_queues: dict = {}
+MERGE_AUDIO_EXTENSIONS = (
+    ".opus", ".ogg", ".oga", ".mp2", ".mp3", ".aac", ".m4a", ".m4b",
+    ".wma", ".ac3", ".eac3", ".ec3", ".wav", ".flac",
+)
 
 
-def _get_edit_queue(msg) -> "asyncio.Queue[str | None]":
-    """Return (or create) the single-writer edit queue for this status message."""
-    key = id(msg)
-    if key not in _edit_queues:
-        q: asyncio.Queue = asyncio.Queue()
-        _edit_queues[key] = q
-
-        async def _worker():
-            latest = None
-            while True:
-                item = await q.get()
-                if item is None:           # sentinel: done
-                    _edit_queues.pop(key, None)
-                    break
-                # Drain all queued items — keep only the latest one
-                while not q.empty():
-                    item = q.get_nowait()
-                    if item is None:
-                        _edit_queues.pop(key, None)
-                        return
-                latest = item
-                try:
-                    await msg.edit_text(latest)
-                except Exception:
-                    pass
-
-        asyncio.create_task(_worker())
-    return _edit_queues[key]
+def _merge_video_source(message):
+    """Return source metadata for a replied video/document."""
+    return _quality_source_from_message(message)
 
 
-def _fire_edit(msg, text: str) -> None:
-    """Enqueue a message edit; the per-message worker serializes & deduplicates them."""
-    _get_edit_queue(msg).put_nowait(text)
-
-
-def _close_edit_queue(msg) -> None:
-    """Send sentinel to stop the worker after all queued edits finish."""
-    q = _edit_queues.get(id(msg))
-    if q:
-        q.put_nowait(None)
-
-
-async def progress_for_pyrogram(current, total, message, start, msg,
-                                 save_dir=None, was_cancelled=False):
-    if not total:
-        return
-    now      = time.time()
-    msg_key  = id(msg)
-
-    if current == total:
-        # Completion — close the in-progress queue and await the final card directly
-        # so the caller is sure the success message has landed before it returns.
-        _close_edit_queue(msg)
-        label    = _retention_label()
-        filename = os.path.basename(save_dir) if save_dir else "File"
-        size_str = f"{total/(1024**3):.1f} GB" if total >= 1024**3 else f"{total/(1024**2):.1f} MB"
-        task_id  = _upload_task_id(msg_key)
-        final    = (
-            f"✅ Sent Successfully\n\n"
-            f"📁 File Name:\n{filename}\n\n"
-            f"📦 Size:\n{size_str}\n\n"
-            f"📤 Destination:\nTelegram\n\n"
-            f"🆔 Task:\n{task_id}\n\n"
-        )
-        if was_cancelled:
-            final += "⚠️ Partial recording sent.\n"
-        final += f"Server copy auto-deletes in {label}."
-        try:
-            await msg.edit_text(final)
-        except Exception:
-            pass
-        _progress_last_edit.pop(msg_key, None)
-        return
-
-    # Throttle: only enqueue an update every _PROGRESS_THROTTLE_SEC seconds
-    last = _progress_last_edit.get(msg_key, 0)
-    if now - last < _PROGRESS_THROTTLE_SEC:
-        return
-    _progress_last_edit[msg_key] = now
-
-    diff    = now - start or 1
-    speed   = current / diff if diff > 0 else 0
-    eta_sec = int((total - current) / speed) if speed > 0 else 0
-    task_id = _upload_task_id(msg_key)
-    title   = "Uploading partial recording to Telegram" if was_cancelled else "Uploading to Telegram"
-    text    = _fmt_upload_progress_box(title, current, total, speed, eta_sec, task_id)
-    _fire_edit(msg, text)   # non-blocking; worker serialises & deduplicates
-
-
-# ---------------------------------------------------------------------------
-# 2 GB auto-split helper
-# ---------------------------------------------------------------------------
-
-TG_MAX_BYTES = 1_980_000_000  # 1.98 GB — safe margin under Telegram's 2 GB hard limit
-
-
-# ---------------------------------------------------------------------------
-# Failed-upload persistence (so /resend can retry after a bot restart)
-# ---------------------------------------------------------------------------
-
-def _save_failed_upload(uid: int, chat_id: int, file_path: str,
-                        caption: str, duration: int, thumb_path) -> None:
-    try:
-        with open(join(FAILED_UPLOADS_DIR, f"{uid}.json"), "w") as _f:
-            json.dump({"file_path": file_path, "caption": caption,
-                       "duration": duration, "thumb_path": thumb_path,
-                       "chat_id": chat_id, "ts": time.time()}, _f)
-    except Exception as _e:
-        LOG.warning("_save_failed_upload: %s", _e)
-
-
-def _load_failed_upload(uid: int) -> dict | None:
-    try:
-        with open(join(FAILED_UPLOADS_DIR, f"{uid}.json"), "r") as _f:
-            return json.load(_f)
-    except Exception:
+def _merge_audio_source(message):
+    """Return source metadata for an uploaded supported audio file."""
+    if not message:
         return None
+    if message.audio:
+        audio = message.audio
+        name = audio.file_name or "added_audio.mp3"
+        return {
+            "file_id": audio.file_id,
+            "file_name": name,
+            "file_size": audio.file_size or 0,
+        }
+    if message.document:
+        document = message.document
+        name = document.file_name or "added_audio"
+        mime = (document.mime_type or "").lower()
+        if mime.startswith("audio/") or name.lower().endswith(MERGE_AUDIO_EXTENSIONS):
+            return {
+                "file_id": document.file_id,
+                "file_name": name,
+                "file_size": document.file_size or 0,
+            }
+    return None
 
 
-def _clear_failed_upload(uid: int) -> None:
+def _merge_menu(token: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton("🎵 Merger 1", callback_data=f"merge:1:{token}"),
+        InlineKeyboardButton("🎵 Merger 2", callback_data=f"merge:2:{token}"),
+    ]])
+
+
+async def merge_video_audio_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Start the video/audio merger flow from a replied Telegram video."""
+    now = time.time()
+    for token, item in list(MERGE_PENDING.items()):
+        if now - item.get("created_at", 0) > MERGE_PENDING_TTL:
+            MERGE_PENDING.pop(token, None)
+
+    source = _merge_video_source(update.message.reply_to_message)
+    if not source:
+        await update.message.reply_text(
+            "❌ Reply to a video or video document with `/Merge_video_And_Audio`.",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        return
+    if source["file_size"] and source["file_size"] > TELEGRAM_BOT_DOWNLOAD_LIMIT:
+        await update.message.reply_text(
+            f"❌ The video exceeds the Telegram Bot API download limit of {telegram_limit_text()}.",
+        )
+        return
+
+    token = _secrets.token_hex(8)
+    MERGE_PENDING[token] = {
+        "user_id": update.effective_user.id,
+        "chat_id": update.effective_chat.id,
+        "video_file_id": source["file_id"],
+        "video_name": source["file_name"],
+        "video_size": source["file_size"],
+        "created_at": now,
+    }
+    await update.message.reply_text(
+        "🎬 *Merge Video & Audio*\n\n"
+        "Merger 1 :\n"
+        "Replace all existing audio tracks with the uploaded audio.\n"
+        "_(Single Audio)_\n\n"
+        "Merger 2 :\n"
+        "Keep all existing audio tracks and subtitles, and add the uploaded audio.\n"
+        "_(Multi Audio)_\n\n"
+        "🥰 Added audio should play correctly inside Telegram.\n\n"
+        "Supported Audio:\n"
+        "Opus • Vorbis • MP2 • MP3 • AAC • HE-AAC • WMA v1 • WMA v2 • AC3 • E-AC3",
+        reply_markup=_merge_menu(token),
+        parse_mode=ParseMode.MARKDOWN,
+    )
+
+
+async def merge_mode_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    parts = query.data.split(":")
+    if len(parts) != 3 or parts[1] not in {"1", "2"}:
+        await query.answer("Invalid merger selection.", show_alert=True, cache_time=0)
+        return
+    mode, token = parts[1], parts[2]
+    pending = MERGE_PENDING.get(token)
+    if not pending or time.time() - pending.get("created_at", 0) > MERGE_PENDING_TTL:
+        MERGE_PENDING.pop(token, None)
+        await query.answer("This merger selection has expired.", show_alert=True)
+        return
+    if pending["user_id"] != query.from_user.id:
+        await query.answer(
+            "❌ Only the user who opened this menu can use it.",
+            show_alert=True,
+            cache_time=0,
+        )
+        return
+    pending["mode"] = mode
+    pending["state"] = "waiting_audio"
+    pending["created_at"] = time.time()
+    await query.answer("Waiting for the audio upload...", cache_time=0)
+    await query.edit_message_text(
+        "Now Send 🎵 Audio File To Merge",
+        parse_mode=ParseMode.MARKDOWN,
+    )
+
+
+def _build_merge_status_text(filename: str, pct: float, speed_mbps: float | None,
+                             status: str = "Merging...") -> str:
+    speed_text = "Calculating..." if not speed_mbps else f"{speed_mbps:.2f} MB/s"
+    return (
+        "🎬 Video-Audio Merging...\n\n"
+        f"📄 File:\n`{filename}`\n\n"
+        "Progress:\n"
+        f"`[{_progress_bar(int(pct))}] {pct:.2f}%`\n\n"
+        f"⚡ Speed: `{speed_text}`\n\n"
+        f"Status: {status}"
+    )
+
+
+def _build_merge_popup_text(task_id: str) -> str:
+    info = RECORDING_PROGRESS_INFO.get(task_id)
+    if not info:
+        return "⚠️ Merge info not available."
+    filename = str(info.get("filename") or "Unknown")
+    pct = float(info.get("pct") or 0.0)
+    elapsed = max(0.0, float(info.get("elapsed") or 0.0))
+    total = max(0.0, float(info.get("total_duration") or 0.0))
+    speed = float(info.get("speed_mbps") or 0.0)
+    user_obj = info.get("user_obj")
+    username = (
+        f"@{user_obj.username}" if user_obj and user_obj.username
+        else (user_obj.first_name if user_obj else "Unknown")
+    )
+    user_id = user_obj.id if user_obj else "Unknown"
+    remaining = max(0.0, total - elapsed) if total else 0.0
+    speed_text = "Calculating..." if not speed else f"{speed:.2f} MB/s"
+    return (
+        f"📄 {filename[:30]}\n"
+        f"📊 [{_progress_bar(int(pct))}] {pct:.1f}%\n"
+        f"{str(info.get('status') or '🎬 Merging')[:22]}\n"
+        f"⏱ {_fmt_time(elapsed)}\n"
+        f"⏳ {_fmt_time(remaining)}\n"
+        f"⚡ {speed_text}\n"
+        f"👤 {str(username)[:18]}\n"
+        f"🆔 {str(user_id)[:12]}"
+    )[:200]
+
+
+class _ProgressUploadFile:
+    """File-like wrapper that exposes upload bytes to the shared updater."""
+
+    def __init__(self, file_obj, info):
+        self._file = file_obj
+        self._info = info
+
+    def read(self, size=-1):
+        data = self._file.read(size)
+        self._info["upload_bytes"] = self._file.tell()
+        return data
+
+    def seek(self, offset, whence=0):
+        result = self._file.seek(offset, whence)
+        self._info["upload_bytes"] = self._file.tell()
+        return result
+
+    def tell(self):
+        return self._file.tell()
+
+    def fileno(self):
+        return self._file.fileno()
+
+    def readable(self):
+        return self._file.readable()
+
+    def seekable(self):
+        return self._file.seekable()
+
+    def writable(self):
+        return False
+
+    def __getattr__(self, name):
+        return getattr(self._file, name)
+
+
+async def _merge_ffmpeg(input_video: str, input_audio: str, output_path: str,
+                        mode: str, task_id: str):
+    progress_file = f"/tmp/ffmpeg_merge_{task_id}.txt"
+    if mode == "1":
+        maps = [
+            "-map", "0:v:0", "-map", "0:s?", "-map", "0:t?",
+            "-map", "1:a:0",
+        ]
+    else:
+        maps = [
+            "-map", "0:v:0", "-map", "0:a?", "-map", "0:s?", "-map", "0:t?",
+            "-map", "1:a:0",
+        ]
+    video_probe = await _stream_probe_file(input_video)
+    video_audio_count = sum(
+        1 for stream in video_probe["streams"]
+        if stream.get("codec_type") == "audio"
+    )
+    video_metadata = await build_ffmpeg_metadata(
+        input_video,
+        selected_streams={
+            "video": [0],
+            "audio": [] if mode == "1" else None,
+            "subtitle": None,
+        },
+    )
+    added_audio_metadata = await build_ffmpeg_metadata(
+        input_audio,
+        selected_streams={"audio": [0]},
+        stream_offsets={"audio": 0 if mode == "1" else video_audio_count},
+        include_format_metadata=False,
+    )
+    cmd = [
+        "ffmpeg", "-hide_banner", "-y",
+        "-i", input_video, "-i", input_audio,
+        *maps,
+        "-c:v", "copy",
+        "-c:a", "aac", "-b:a", "192k", "-ar", "48000",
+        "-c:s", "copy",
+        "-c:t", "copy",
+        "-map_metadata", "0",
+        "-map_chapters", "0",
+        "-shortest",
+        "-max_muxing_queue_size", "4096",
+        "-movflags", "+faststart",
+        "-progress", progress_file, "-nostats",
+        output_path,
+    ]
+    cmd[-1:-1] = video_metadata + added_audio_metadata
+    proc = await asyncio.create_subprocess_exec(
+        *cmd, stdout=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    RECORDING_SESSION_PROC[task_id] = proc
+    info = RECORDING_PROGRESS_INFO.get(task_id)
+    if info:
+        info["process"] = proc
+        info["progress_file"] = progress_file
+        info["status"] = "🎬 Merging"
     try:
-        os.remove(join(FAILED_UPLOADS_DIR, f"{uid}.json"))
+        stderr_task = asyncio.create_task(proc.stderr.read())
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=1800)
+        except asyncio.TimeoutError:
+            if proc.returncode is None:
+                proc.kill()
+                await proc.wait()
+            return False, "Merge timed out."
+        stderr = await stderr_task
+        info = RECORDING_PROGRESS_INFO.get(task_id)
+        if info and not info.get("running", True):
+            return False, "Merge cancelled."
+        if proc.returncode != 0:
+            return False, stderr.decode(errors="replace")[-1500:]
+        return True, ""
+    except asyncio.TimeoutError:
+        if proc.returncode is None:
+            proc.kill()
+            await proc.wait()
+        return False, "Merge timed out."
+    finally:
+        RECORDING_SESSION_PROC.pop(task_id, None)
+        info = RECORDING_PROGRESS_INFO.get(task_id)
+        if info:
+            info["process"] = None
+        try:
+            os.remove(progress_file)
+        except OSError:
+            pass
+
+
+def _build_upload_status_text(filename: str, pct: float, sent: int,
+                              total: int, speed: float, remaining: int) -> str:
+    filled = int(10 * max(0.0, min(100.0, pct)) / 100)
+    dots = "●" * filled + "⬜" * (10 - filled)
+    return (
+        "📤 Uploading:\n"
+        f"`{filename}`\n\n"
+        f"[{dots}] {pct:.2f}%\n\n"
+        f"{sent / 1024 / 1024:.1f} MB of {total / 1024 / 1024:.2f} MB\n\n"
+        f"Speed:\n{speed:.2f} MB/s\n\n"
+        f"Time Left:\n{remaining}s"
+    )
+
+
+async def merge_audio_message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Receive the audio after a merger mode has been selected."""
+    user_id = update.effective_user.id
+    chat_id = update.effective_chat.id
+    pending = next(
+        (
+            item for item in MERGE_PENDING.values()
+            if item.get("user_id") == user_id
+            and item.get("chat_id") == chat_id
+            and item.get("state") == "waiting_audio"
+            and time.time() - item.get("created_at", 0) <= MERGE_PENDING_TTL
+        ),
+        None,
+    )
+    if not pending:
+        return
+    audio = _merge_audio_source(update.message)
+    if not audio:
+        await update.message.reply_text(
+            "❌ Send a supported audio file: Opus, Vorbis, MP2, MP3, AAC, "
+            "HE-AAC, WMA, AC3 ya E-AC3.",
+        )
+        return
+    if audio["file_size"] and audio["file_size"] > TELEGRAM_BOT_DOWNLOAD_LIMIT:
+        await update.message.reply_text(
+            f"❌ The audio exceeds the Telegram Bot API download limit of {telegram_limit_text()}.",
+        )
+        return
+    if not await check_process_slot(update):
+        return
+
+    token = next((k for k, v in MERGE_PENDING.items() if v is pending), None)
+    if token:
+        MERGE_PENDING.pop(token, None)
+    task_id = _secrets.token_hex(8)
+    filename = pending["video_name"]
+    status_message = await update.message.reply_text(
+        _build_merge_status_text(filename, 0.0, None, "Merging..."),
+        reply_markup=_build_rec_progress_inline(task_id),
+        parse_mode=ParseMode.MARKDOWN,
+    )
+    asyncio.create_task(
+        _run_merge_job(update, context, pending, audio, status_message, task_id)
+    )
+
+
+async def _run_merge_job(update, context, pending, audio, status_message, task_id):
+    global _active_processes
+    work_dir = f"/tmp/merge_{task_id}"
+    os.makedirs(work_dir, exist_ok=True)
+    input_video = os.path.join(work_dir, "video")
+    input_audio = os.path.join(work_dir, "audio")
+    extension = Path(pending["video_name"]).suffix or ".mkv"
+    output_name = f"{Path(pending['video_name']).stem}_merged{extension}"
+    output_path = os.path.join(work_dir, output_name)
+    user_obj = update.effective_user
+    start_time = time.time()
+    RECORDING_PROGRESS_INFO[task_id] = {
+        "process": None, "start_time": start_time, "duration": 0.0,
+        "total_duration": 0.0, "filename": pending["video_name"],
+        "file_name": pending["video_name"],
+        "message_id": status_message.message_id, "chat_id": pending["chat_id"],
+        "speed": 0.0, "speed_mbps": 0.0, "platform": "Video Merger",
+        "channel": {"channelCategoryId": "Video Merger"}, "user_obj": user_obj,
+        "user_id": user_obj.id, "pct": 0.0, "elapsed": 0.0,
+        "status": "🎬 Merging", "running": True, "kind": "merge",
+        "phase": "merge",
+    }
+    _active_processes += 1
+    updater_task = asyncio.create_task(
+        _auto_updater(task_id, status_message, None, filename, 0.0, start_time)
+    )
+    ACTIVE_UPDATERS[task_id] = updater_task
+    try:
+        video_file = await context.bot.get_file(pending["video_file_id"])
+        await video_file.download_to_drive(custom_path=input_video)
+        audio_file = await context.bot.get_file(audio["file_id"])
+        await audio_file.download_to_drive(custom_path=input_audio)
+        info = RECORDING_PROGRESS_INFO.get(task_id)
+        if not info or not info.get("running", True):
+            await status_message.edit_text(
+                "❌ Merge Cancelled\n\n⚠️ Partial Output Deleted",
+            )
+            return
+        duration = await _media_duration_seconds(input_video)
+        info["duration"] = duration
+        info["total_duration"] = duration
+        info["source_path"] = output_path
+        ok, error = await _merge_ffmpeg(
+            input_video, input_audio, output_path, pending["mode"], task_id
+        )
+        info = RECORDING_PROGRESS_INFO.get(task_id)
+        if not ok:
+            cancelled = not info or not info.get("running", True)
+            await status_message.edit_text(
+                "❌ Merge Cancelled\n\n⚠️ Partial Output Deleted"
+                if cancelled else
+                f"❌ Merge Failed\n\n⚠️ Partial Output Deleted\n\n`{error[:500]}`",
+                parse_mode=ParseMode.MARKDOWN,
+            )
+            return
+        if not os.path.exists(output_path) or os.path.getsize(output_path) < 1024:
+            await status_message.edit_text(
+                "❌ Merge Failed\n\n⚠️ Partial Output Deleted",
+            )
+            return
+        info["phase"] = "upload"
+        info["status"] = "📤 Uploading"
+        info["upload_bytes"] = 0
+        info["upload_size"] = os.path.getsize(output_path)
+        info["upload_start"] = time.time()
+        info["pct"] = 0.0
+        await status_message.edit_text(
+            "✅ Merge Completed\n\n"
+            f"📄 File:\n`{output_name}`\n\n"
+            "Uploading...",
+            reply_markup=_build_rec_progress_inline(task_id),
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        upload_file = None
+        try:
+            with open(output_path, "rb") as raw:
+                upload_file = _ProgressUploadFile(raw, info)
+                telegram_input = InputFile(
+                    upload_file, filename=output_name, read_file_handle=False
+                )
+                await context.bot.send_video(
+                    chat_id=pending["chat_id"], video=telegram_input,
+                    caption=f"🎬 {output_name}", supports_streaming=True,
+                    read_timeout=1800, write_timeout=1800,
+                )
+        except Exception:
+            with open(output_path, "rb") as raw:
+                upload_file = _ProgressUploadFile(raw, info)
+                telegram_input = InputFile(
+                    upload_file, filename=output_name, read_file_handle=False
+                )
+                await context.bot.send_document(
+                    chat_id=pending["chat_id"], document=telegram_input,
+                    caption=f"🎬 {output_name}",
+                    read_timeout=1800, write_timeout=1800,
+                )
+        await status_message.edit_text(
+            "✅ Upload Completed\n\n"
+            f"📄 File:\n`{output_name}`\n\n"
+            f"{_AUDIO_TRACK_COMPATIBILITY_NOTE}",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+    except Exception:
+        logger.exception("Video/audio merge failed")
+        try:
+            await status_message.edit_text(
+                "❌ Merge Failed\n\n⚠️ Partial Output Deleted",
+            )
+        except Exception:
+            pass
+    finally:
+        info = RECORDING_PROGRESS_INFO.get(task_id)
+        if info:
+            info["running"] = False
+        RECORDING_SESSION_PROC.pop(task_id, None)
+        task = ACTIVE_UPDATERS.pop(task_id, None)
+        if task and not task.done():
+            task.cancel()
+        _active_processes = max(0, _active_processes - 1)
+        shutil.rmtree(work_dir, ignore_errors=True)
+        RECORDING_PROGRESS_INFO.pop(task_id, None)
+
+
+async def _media_duration_seconds(path: str) -> float:
+    """Read a media duration for the shared progress display."""
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "ffprobe", "-v", "error",
+            "-show_entries", "format=duration",
+            "-of", "default=noprint_wrappers=1:nokey=1",
+            path,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=30)
+        return max(0.0, float(stdout.decode().strip()))
+    except (asyncio.TimeoutError, OSError, ValueError):
+        return 0.0
+
+
+async def _media_video_dimensions(path: str) -> tuple[int, int]:
+    """Read the first video stream dimensions for a media selector."""
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "ffprobe", "-v", "error", "-select_streams", "v:0",
+            "-show_entries", "stream=width,height",
+            "-of", "json", path,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=30)
+        streams = json.loads(stdout.decode(errors="replace")).get("streams", [])
+        if streams:
+            return int(streams[0].get("width") or 0), int(streams[0].get("height") or 0)
+    except (asyncio.TimeoutError, OSError, ValueError, TypeError, json.JSONDecodeError):
+        pass
+    return 0, 0
+
+
+def _screenshot_menu(token: str, duration: float, width: int, height: int):
+    duration_text = (
+        f"{int(duration // 60):02d}:{int(duration % 60):02d}"
+        if duration < 3600 else _fmt_time(duration)
+    )
+    resolution = f"{height}p" if height else "Unknown"
+    keyboard = []
+    row = []
+    for count in range(1, 31):
+        row.append(
+            InlineKeyboardButton(
+                str(count),
+                callback_data=f"screenshot:{token}:{count}",
+            )
+        )
+        if len(row) == 5:
+            keyboard.append(row)
+            row = []
+    if row:
+        keyboard.append(row)
+    keyboard.append([
+        InlineKeyboardButton("❌ Cancel", callback_data=f"screenshot_cancel:{token}")
+    ])
+    text = (
+        "📸 *Screenshot Generator*\n\n"
+        f"*Source:* `{duration_text} • {resolution}`\n\n"
+        "Select the number of screenshots\n\n"
+        "✶ Click the Button of your choice 👇 *1 to 30*"
+    )
+    return text, InlineKeyboardMarkup(keyboard)
+
+
+async def screenshot_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    parts = query.data.split(":")
+    if len(parts) != 3:
+        await query.answer("Invalid screenshot request.", show_alert=True)
+        return
+    token, count_text = parts[1], parts[2]
+    try:
+        count = int(count_text)
+    except ValueError:
+        await query.answer("Invalid screenshot count.", show_alert=True)
+        return
+    if not 1 <= count <= 30:
+        await query.answer("Choose between 1 and 30 screenshots.", show_alert=True)
+        return
+    pending = SCREENSHOT_PENDING.get(token)
+    if (
+        not pending
+        or time.time() - pending.get("created_at", 0) > QUALITY_PENDING_TTL
+    ):
+        SCREENSHOT_PENDING.pop(token, None)
+        await query.answer("Screenshot menu expired.", show_alert=True)
+        return
+    if pending["user_id"] != query.from_user.id:
+        await query.answer("Only the requesting user can use these buttons.", show_alert=True)
+        return
+    if not await check_process_slot(update):
+        return
+    SCREENSHOT_PENDING.pop(token, None)
+    await query.answer(f"Generating {count} screenshot(s)...")
+    await query.edit_message_text(
+        f"📸 Screenshot Generator\n\n"
+        f"Source: `{pending['duration_text']} • "
+        f"{pending['resolution']}`\n\n"
+        f"Selected screenshots: `{count}`\n"
+        "Downloading...",
+        parse_mode=ParseMode.MARKDOWN,
+    )
+    source = pending["source"]
+    await _media_local_job(
+        update, context, source, "screenshot", [str(count)],
+        status_message=query.message,
+    )
+
+
+async def screenshot_cancel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    parts = query.data.split(":")
+    token = parts[1] if len(parts) == 2 else ""
+    pending = SCREENSHOT_PENDING.get(token)
+    if pending and pending.get("user_id") != query.from_user.id:
+        await query.answer("Only the requesting user can cancel this menu.", show_alert=True)
+        return
+    SCREENSHOT_PENDING.pop(token, None)
+    await query.answer("Screenshot selection cancelled.")
+    try:
+        await query.edit_message_text("❌ Screenshot selection cancelled.")
     except Exception:
         pass
 
 
-_NETWORK_ERR_KEYWORDS = (
-    "timeout", "timed out", "connection", "network", "reset", "broken",
-    "eof", "read error", "502", "503", "peer", "ssl", "unreachable",
-)
-
-def _is_network_error(exc: Exception) -> bool:
-    return any(kw in str(exc).lower() for kw in _NETWORK_ERR_KEYWORDS)
-
-
-async def split_and_send_video(
-    send_target,
-    video_path: str,
-    caption: str,
-    duration: int,
-    thumb_path=None,
-    status_msg=None,
-    progress=None,
-    progress_args=None,
-    _uid: int = 0,
-    _chat_id: int = 0,
-):
-    """
-    Send a video to Telegram with automatic retry (up to 3 attempts) and
-    FloodWait handling. Falls back to reply_document if reply_video keeps
-    failing. On final failure the upload details are persisted to disk so the
-    user can run /resend after a bot restart.
-
-    If the file exceeds TG_MAX_BYTES (1.95 GB) it is automatically split into
-    equal-duration parts using FFmpeg (-c copy, no re-encoding) and each part
-    is uploaded separately with '📂 Part X / Y' appended to the caption.
-    """
-    _MAX_ATTEMPTS = 3
-    size = os.path.getsize(video_path)
-
-    if size <= TG_MAX_BYTES:
-        last_err: Exception | None = None
-
-        for attempt in range(_MAX_ATTEMPTS):
+async def _transcode_video(input_path: str, output_path: str, height: int,
+                           task_id: str | None = None):
+    """Transcode a Telegram video while exposing a cancellable FFmpeg process."""
+    progress_file = (
+        f"/tmp/ffmpeg_quality_{task_id}.txt"
+        if task_id else None
+    )
+    cmd = [
+        "ffmpeg", "-hide_banner", "-y",
+        "-i", input_path,
+        "-map", "0:v:0",
+        "-map", "0:a?",
+        "-vf", f"scale=-2:{height}",
+        "-c:v", "libx264",
+        "-crf", "23",
+        "-preset", "ultrafast",
+        "-pix_fmt", "yuv420p",
+        "-c:a", "aac",
+        "-b:a", "128k",
+        "-ar", "48000",
+        "-ac", "2",
+        "-disposition:a:0", "default",
+        "-map", "0:s?",
+        "-map", "0:t?",
+        "-c:s", "copy",
+        "-c:t", "copy",
+        "-map_chapters", "0",
+        "-movflags", "+faststart",
+        *(["-progress", progress_file, "-nostats"] if progress_file else []),
+        output_path,
+    ]
+    metadata = await build_ffmpeg_metadata(
+        input_path,
+        selected_streams={"video": [0], "audio": None, "subtitle": None},
+    )
+    cmd[-1:-1] = metadata
+    proc = await asyncio.create_subprocess_exec(
+        *cmd,
+        stdout=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    if task_id:
+        RECORDING_SESSION_PROC[task_id] = proc
+        info = RECORDING_PROGRESS_INFO.get(task_id)
+        if info:
+            info["process"] = proc
+            info["progress_file"] = progress_file
+            info["status"] = "🎥 Recording"
+    try:
+        stderr_task = asyncio.create_task(proc.stderr.read())
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=1800)
+        except asyncio.TimeoutError:
+            if proc.returncode is None:
+                proc.kill()
+                await proc.wait()
+            return False, "Conversion timed out."
+        stderr = await stderr_task
+        if task_id and not RECORDING_PROGRESS_INFO.get(task_id, {}).get("running", True):
+            return False, "Conversion cancelled."
+        if proc.returncode != 0:
+            return False, stderr.decode(errors="replace")[-1200:]
+        return True, ""
+    except asyncio.TimeoutError:
+        if proc.returncode is None:
+            proc.kill()
+            await proc.wait()
+        return False, "Conversion timed out."
+    finally:
+        RECORDING_SESSION_PROC.pop(task_id, None) if task_id else None
+        if task_id:
+            info = RECORDING_PROGRESS_INFO.get(task_id)
+            if info:
+                info["process"] = None
+        if progress_file:
             try:
-                await send_target.reply_video(
-                    video=video_path,
-                    caption=caption,
-                    duration=duration or None,
-                    thumb=thumb_path,
-                    progress=progress,
-                    progress_args=progress_args,
-                    supports_streaming=True,
-                )
-                return
-            except FloodWait as fw:
-                LOG.warning("FloodWait %ds (attempt %d/%d)", fw.value, attempt + 1, _MAX_ATTEMPTS)
-                await asyncio.sleep(fw.value + 3)
-                last_err = fw
-                continue
-            except Exception as _err:
-                last_err = _err
-                if _is_network_error(_err) and attempt < _MAX_ATTEMPTS - 1:
-                    wait = 20 * (attempt + 1)
-                    LOG.warning("Upload attempt %d/%d failed (network) — retry in %ds: %s",
-                                attempt + 1, _MAX_ATTEMPTS, wait, _err)
-                    if status_msg:
-                        try:
-                            await status_msg.edit_text(
-                                f"⚠️ Upload interrupted (attempt {attempt + 1}/{_MAX_ATTEMPTS})."
-                                f" Retrying in {wait}s…"
-                            )
-                        except Exception:
-                            pass
-                    await asyncio.sleep(wait)
-                    continue
-                # Non-network error or last attempt — try as document fallback
-                LOG.warning("reply_video failed (attempt %d), trying as document: %s",
-                            attempt + 1, _err)
-                try:
-                    await send_target.reply_document(
-                        document=video_path,
-                        caption=caption,
-                        thumb=thumb_path,
-                        progress=progress,
-                        progress_args=progress_args,
-                    )
-                    return
-                except Exception as _doc_err:
-                    LOG.error("reply_document fallback also failed: %s", _doc_err)
-                    last_err = _doc_err
-                    break
+                os.remove(progress_file)
+            except OSError:
+                pass
 
-        # All attempts exhausted — persist so user can /resend
-        if _uid:
-            _save_failed_upload(_uid, _chat_id, video_path, caption, duration, thumb_path)
-            LOG.error("Upload failed after %d attempts — saved for /resend uid=%d", _MAX_ATTEMPTS, _uid)
-        if last_err:
-            raise last_err
+
+async def qualitymax_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    parts = query.data.split(":")
+    if len(parts) != 3:
+        await query.answer("Invalid quality request.", show_alert=True)
+        return
+    token, height_text = parts[1], parts[2]
+    try:
+        height = int(height_text)
+    except ValueError:
+        await query.answer("Invalid quality.", show_alert=True)
+        return
+    if height not in (140, 240, 480, 720, 1080):
+        await query.answer("Unsupported quality.", show_alert=True)
         return
 
-    num_parts  = math.ceil(size / TG_MAX_BYTES)
-    size_gb    = size / (1024 ** 3)
-    LOG.info("Auto-split: %.2f GB → %d parts  file=%s", size_gb, num_parts, video_path)
+    pending = QUALITY_PENDING.get(token)
+    if not pending or time.time() - pending.get("created_at", 0) > QUALITY_PENDING_TTL:
+        QUALITY_PENDING.pop(token, None)
+        await query.answer("This quality selection has expired.", show_alert=True)
+        return
+    if pending["user_id"] != query.from_user.id:
+        await query.answer("Only the user who opened this menu can use it.", show_alert=True)
+        return
+    if not await check_process_slot(update):
+        return
+    QUALITY_PENDING.pop(token, None)
 
-    if status_msg:
+    await query.answer(f"{height}p conversion is starting...")
+    work_dir = f"/tmp/qualitymax_{_secrets.token_hex(8)}"
+    os.makedirs(work_dir, exist_ok=True)
+    input_path = os.path.join(work_dir, "source")
+    output_path = os.path.join(work_dir, f"converted_{height}p.mp4")
+    status_message = query.message
+    task_id = _secrets.token_hex(8)
+    source_filename = pending["file_name"]
+    user_obj = query.from_user
+    start_time = time.time()
+    RECORDING_PROGRESS_INFO[task_id] = {
+        "process": None,
+        "start_time": start_time,
+        "duration": 0.0,
+        "total_duration": 0.0,
+        "filename": source_filename,
+        "file_name": source_filename,
+        "message_id": status_message.message_id,
+        "chat_id": pending["chat_id"],
+        "speed": 0.0,
+        "speed_mbps": 0.0,
+        "platform": "Qualitymax",
+        "channel": {"channelCategoryId": "Qualitymax"},
+        "user_obj": user_obj,
+        "user_id": user_obj.id,
+        "pct": 0.0,
+        "elapsed": 0.0,
+        "status": "⬇️ Downloading",
+        "running": True,
+    }
+    global _active_processes
+    _active_processes += 1
+    try:
+        await status_message.edit_text(
+            _build_rec_status_text(
+                source_filename, 0.0, None, "⬇️ Downloading"
+            ),
+            reply_markup=_build_rec_progress_inline(task_id),
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        updater_task = asyncio.create_task(
+            _auto_updater(
+                task_id, status_message, None, source_filename, 0.0, start_time
+            )
+        )
+        ACTIVE_UPDATERS[task_id] = updater_task
         try:
-            await status_msg.edit_text(
-                f"📦 File is {size_gb:.2f} GB — exceeds Telegram's 2 GB limit.\n"
-                f"Splitting into {num_parts} parts… please wait."
+            telegram_file = await context.bot.get_file(pending["file_id"])
+            await telegram_file.download_to_drive(custom_path=input_path)
+        except Exception as exc:
+            error_text = str(exc)
+            if "file is too big" in error_text.lower():
+                await status_message.edit_text(
+                    f"❌ The source video exceeds the Telegram Bot API "
+                    f"download limit of {telegram_limit_text()}.\n\n"
+                    "Compress or shorten the video and send it again.",
+                )
+            else:
+                await status_message.edit_text(
+                    f"❌ Could not download the source video:\n`{error_text[:800]}`",
+                    parse_mode=ParseMode.MARKDOWN,
+                )
+            return
+        info = RECORDING_PROGRESS_INFO.get(task_id)
+        if not info or not info.get("running", True):
+            await status_message.edit_text(
+                f"❌ Recording Cancelled\n\n"
+                f"📄 File:\n`{source_filename}`\n\n"
+                f"⚠️ Download cancelled before conversion.",
+                parse_mode=ParseMode.MARKDOWN,
+            )
+            return
+        source_duration = await _media_duration_seconds(input_path)
+        info["duration"] = source_duration
+        info["total_duration"] = source_duration
+        info["source_path"] = input_path
+        info["source_size"] = os.path.getsize(input_path) if os.path.exists(input_path) else 0
+        info["status"] = "🎥 Recording"
+        await status_message.edit_text(
+            _build_rec_status_text(
+                source_filename, 0.0, None, "🎥 Recording"
+            ),
+            reply_markup=_build_rec_progress_inline(task_id),
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        ok, error = await _transcode_video(
+            input_path, output_path, height, task_id=task_id
+        )
+        if not ok:
+            info = RECORDING_PROGRESS_INFO.get(task_id)
+            cancelled = not info or not info.get("running", True)
+            partial_uploaded = False
+            if os.path.exists(output_path) and os.path.getsize(output_path) >= 1024:
+                partial_caption = f"📄 {source_filename} (partial)"
+                try:
+                    with open(output_path, "rb") as partial_file:
+                        await context.bot.send_video(
+                            chat_id=pending["chat_id"],
+                            video=partial_file,
+                            caption=partial_caption,
+                            supports_streaming=True,
+                            read_timeout=600,
+                            write_timeout=600,
+                        )
+                    partial_uploaded = True
+                except Exception:
+                    try:
+                        with open(output_path, "rb") as partial_file:
+                            await context.bot.send_document(
+                                chat_id=pending["chat_id"],
+                                document=partial_file,
+                                caption=partial_caption,
+                                read_timeout=600,
+                                write_timeout=600,
+                            )
+                        partial_uploaded = True
+                    except Exception:
+                        partial_uploaded = False
+            await status_message.edit_text(
+                f"{'❌ Recording Cancelled' if cancelled else '❌ Recording Failed'}\n\n"
+                f"{'⚠️ Partial Recording Sent\n\n' if partial_uploaded else ''}"
+                f"📄 File:\n`{source_filename}`\n\n"
+                f"⏺ Recorded:\n`{_fmt_time(info.get('elapsed', 0.0) if info else 0.0)}`\n\n"
+                f"{'📤 The recorded portion has been uploaded successfully.\n\n' if partial_uploaded else '⚠️ No partial recording was available to upload.\n\n'}"
+                f"⏳ Server copy auto-deletes in 1 hour.",
+                parse_mode=ParseMode.MARKDOWN,
+            )
+            return
+        valid, validation_error = await validate_recording_file(output_path)
+        if not valid:
+            await status_message.edit_text(
+                f"❌ Recording Failed\n\n"
+                f"📄 File:\n`{source_filename}`\n\n"
+                f"⚠️ The converted video is corrupt; upload was stopped.",
+                parse_mode=ParseMode.MARKDOWN,
+            )
+            return
+
+        size_mb = os.path.getsize(output_path) / (1024 * 1024)
+        if os.path.getsize(output_path) > TELEGRAM_BOT_UPLOAD_LIMIT:
+            await status_message.edit_text(
+                f"❌ Recording Failed\n\n"
+                f"📄 File:\n`{source_filename}`\n\n"
+                f"❌ The converted `{height}p` file is {size_mb:.1f} MB.\n\n"
+                f"The Telegram Bot API upload limit is {telegram_upload_limit_text()}. "
+                "Choose a lower quality for this video.",
+                parse_mode=ParseMode.MARKDOWN,
+            )
+            return
+        info = RECORDING_PROGRESS_INFO.get(task_id)
+        if info:
+            info["pct"] = 100.0
+            info["elapsed"] = info.get("total_duration", 0.0)
+            info["status"] = "📤 Uploading"
+        await status_message.edit_text(
+            _build_rec_status_text(
+                source_filename, 100.0,
+                info.get("speed_mbps", 0.0) if info else 0.0,
+                "📤 Uploading",
+            ),
+            reply_markup=_build_rec_progress_inline(task_id),
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        caption = f"🎞️ Converted Quality: *{height}p*\n📄 `{pending['file_name']}`"
+        try:
+            with open(output_path, "rb") as video_file:
+                await context.bot.send_video(
+                    chat_id=pending["chat_id"],
+                    video=video_file,
+                    caption=caption,
+                    parse_mode=ParseMode.MARKDOWN,
+                    supports_streaming=True,
+                    read_timeout=600,
+                    write_timeout=600,
+                )
+        except Exception:
+            with open(output_path, "rb") as document_file:
+                await context.bot.send_document(
+                    chat_id=pending["chat_id"],
+                    document=document_file,
+                    caption=caption,
+                    parse_mode=ParseMode.MARKDOWN,
+                    read_timeout=600,
+                    write_timeout=600,
+                )
+        info = RECORDING_PROGRESS_INFO.get(task_id)
+        duration_text = _fmt_time(info.get("total_duration", 0.0) if info else 0.0)
+        await status_message.edit_text(
+            f"✅ Recording Completed\n\n"
+            f"📄 File:\n`{source_filename}`\n\n"
+            f"⏺ Duration:\n`{duration_text}`\n\n"
+            f"📤 Upload completed successfully.\n\n"
+            f"⏳ Server copy auto-deletes in 3 hours.",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+    except Exception as exc:
+        logger.exception("Qualitymax conversion failed")
+        try:
+            await status_message.edit_text(
+                f"❌ Recording Failed\n\n"
+                f"📄 File:\n`{source_filename}`\n\n"
+                f"⚠️ Conversion failed.",
             )
         except Exception:
             pass
+    finally:
+        info = RECORDING_PROGRESS_INFO.get(task_id)
+        if info:
+            info["running"] = False
+        RECORDING_SESSION_PROC.pop(task_id, None)
+        task = ACTIVE_UPDATERS.pop(task_id, None)
+        if task and not task.done():
+            task.cancel()
+        _active_processes -= 1
+        shutil.rmtree(work_dir, ignore_errors=True)
+        RECORDING_PROGRESS_INFO.pop(task_id, None)
 
-    base_dir   = os.path.dirname(video_path)
-    base_name  = os.path.splitext(os.path.basename(video_path))[0]
-    ext        = os.path.splitext(video_path)[1] or ".mkv"
-    dur_int    = int(duration) if duration else 0
-    part_dur   = max(1, dur_int // num_parts) if dur_int else None
-    parts_sent = 0
 
-    for i in range(num_parts):
-        part_path = join(base_dir, f"{base_name}_part{i + 1:02d}{ext}")
+async def verify_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
 
-        if part_dur:
-            ss      = i * part_dur
-            to      = (i + 1) * part_dur if i < num_parts - 1 else dur_int
-            part_sec = to - ss
-            cmd = (
-                f'ffmpeg -hide_banner -loglevel error -nostats -y '
-                f'-ss {ss} -to {to} '
-                f'-i {shlex.quote(video_path)} '
-                f'-c copy {shlex.quote(part_path)}'
+    # Owner/admin/premium users don't need verification.
+    if is_owner(user.id) or is_admin(user.id) or is_premium(user.id):
+        await update.message.reply_text(
+            "✅ Owner/Premium/Admin users do not need verification."
+        )
+        return
+
+    # Already verified?
+    if is_verified(user.id):
+        tokens = get_verify_tokens()
+        entry = tokens.get(str(user.id), {})
+        verified_at = entry.get("verified_at")
+        if verified_at:
+            elapsed = (datetime.now(IST) - datetime.fromisoformat(verified_at)).total_seconds()
+            remaining = int((VERIFICATION_EXPIRY_SECONDS - elapsed) / 60)
+            await update.message.reply_text(
+                f"✅ *You are already verified!*\n"
+                f"⏳ Remaining access: *{remaining} minutes*",
+                parse_mode=ParseMode.MARKDOWN
             )
-        else:
-            part_sec = None
-            cmd = (
-                f'ffmpeg -hide_banner -loglevel error -nostats -y '
-                f'-i {shlex.quote(video_path)} '
-                f'-c copy -f segment -segment_size {TG_MAX_BYTES} '
-                f'-reset_timestamps 1 '
-                f'{shlex.quote(part_path)}'
-            )
+            return
 
-        rc, _out, err = await runcmd(cmd)
-        if rc != 0 or not os.path.exists(part_path) or os.path.getsize(part_path) == 0:
-            LOG.error("Split part %d/%d failed: %s", i + 1, num_parts, err[-500:])
-            continue
+    token = generate_verify_token(user.id)
+    bot_username = BOTUSERNAME or context.bot.username
+    deep_link = f"https://t.me/{bot_username}?start=verify_{user.id}_{token}"
+    short_link = shorten_url(deep_link)
 
-        part_caption = caption + f"\n\n📂 **Part {i + 1}**"
-        try:
-            await send_target.reply_video(
-                video=part_path,
-                caption=part_caption,
-                duration=part_sec,
-                thumb=thumb_path if i == 0 else None,
-                supports_streaming=True,
-            )
-            parts_sent += 1
-        except Exception as split_err:
-            LOG.error("Send part %d/%d failed: %s", i + 1, num_parts, split_err)
-        finally:
-            try:
-                os.remove(part_path)
-            except Exception:
-                pass
-
-    LOG.info("Auto-split done: %d/%d parts sent", parts_sent, num_parts)
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("✅ Verify", url=short_link)],
+        [InlineKeyboardButton("❓ How to Verify", callback_data="howto_verify")],
+    ])
+    msg = await update.message.reply_text(
+        "🔐 *Verification Required*\n\n"
+        "Click the Verify button below to unlock access for 40 minutes.\n\n"
+        "⚠️ This verification message will be automatically deleted after 10 minutes.",
+        reply_markup=keyboard,
+        parse_mode=ParseMode.MARKDOWN
+    )
+    asyncio.create_task(_auto_delete(context.bot, update.effective_chat.id, msg.message_id, 600))
 
 
-# ===========================================================================
-# Google Drive helpers (merged from gdrive.py)
-# ===========================================================================
-
-import urllib.request
-import urllib.parse
-import urllib.error
-
-
-_SCOPES          = ["https://www.googleapis.com/auth/drive.file"]
-_DEVICE_AUTH_URL = "https://oauth2.googleapis.com/device/code"
-_TOKEN_URL       = "https://oauth2.googleapis.com/token"
-_GRANT_TYPE_DEV  = "urn:ietf:params:oauth:grant-type:device_code"
-
-
-# ---------------------------------------------------------------------------
-# Config helpers
-# ---------------------------------------------------------------------------
-
-def _oauth_enabled() -> bool:
-    return bool(GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET)
-
-
-def _sa_enabled() -> bool:
-    return bool(GDRIVE_SA_JSON and GDRIVE_FOLDER_ID)
+async def howto_verify_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    await query.message.reply_text(
+        "❓ *How to Verify*\n\n"
+        "1️⃣ Send the `/verify` command\n"
+        "2️⃣ *✅ Verify* button dabao\n"
+        "3️⃣ Skip the ad or complete the task on the page\n"
+        "4️⃣ Open the bot link shown at the end\n"
+        "5️⃣ Bot bolega *Verification Successful!*\n\n"
+        f"✅ Iske baad *{VERIFICATION_EXPIRY_SECONDS // 60} minute* tak access milega.\n\n"
+        f"📌 Group: {GROUP_LINK}" if GROUP_LINK else
+        "❓ *How to Verify*\n\n"
+        "1️⃣ Send the `/verify` command\n"
+        "2️⃣ *✅ Verify* button dabao\n"
+        "3️⃣ Skip the ad or complete the task on the page\n"
+        "4️⃣ Open the bot link shown at the end\n"
+        "5️⃣ Bot bolega *Verification Successful!*\n\n"
+        f"✅ Iske baad *{VERIFICATION_EXPIRY_SECONDS // 60} minute* tak access milega.",
+        parse_mode=ParseMode.MARKDOWN
+    )
 
 
-def _is_enabled() -> bool:
-    return _sa_enabled() or _oauth_enabled()
-
-
-# ---------------------------------------------------------------------------
-# Per-user token storage
-# ---------------------------------------------------------------------------
-
-def _token_dir() -> str:
-    d = os.path.join(DATA_DIRECTORY, "gdrive_tokens")
-    os.makedirs(d, exist_ok=True)
-    return d
-
-
-def _token_path(user_id: int) -> str:
-    return os.path.join(_token_dir(), f"{user_id}.json")
-
-
-def is_user_connected(user_id: int) -> bool:
-    return os.path.exists(_token_path(user_id))
-
-
-def disconnect_user(user_id: int) -> bool:
-    p = _token_path(user_id)
-    if os.path.exists(p):
-        os.remove(p)
-        return True
-    return False
-
-
-def _save_token(user_id: int, token_data: dict):
-    token_data["saved_at"] = time.time()
-    with open(_token_path(user_id), "w") as f:
-        json.dump(token_data, f)
-
-
-def _load_token(user_id: int) -> dict:
-    with open(_token_path(user_id)) as f:
-        return json.load(f)
-
-
-def get_sa_email() -> str:
+def _fetch_cenc_key(stream_url: str, license_url: str, cookie: str, user_agent: str) -> str:
+    """Fetch the ClearKey decryption key for a CENC-encrypted DASH stream.
+    Returns key_hex string, or empty string on failure."""
     try:
-        return json.loads(GDRIVE_SA_JSON).get("client_email", "")
+        import base64 as _b64
+        padding = lambda s: s + "=" * (-len(s) % 4)
+        hdrs = {}
+        if cookie:
+            hdrs["Cookie"] = cookie
+        if user_agent:
+            hdrs["User-Agent"] = user_agent
+        mpd = requests.get(stream_url, headers=hdrs, timeout=10).text
+        kid_match = re.search(r'default_KID="([^"]+)"', mpd)
+        if not kid_match:
+            return ""
+        kid_uuid = kid_match.group(1).replace("-", "")
+        kid_bytes = bytes.fromhex(kid_uuid)
+        kid_b64 = _b64.urlsafe_b64encode(kid_bytes).rstrip(b"=").decode()
+        lic = requests.post(
+            license_url,
+            data=json.dumps({"kids": [kid_b64], "type": "temporary"}),
+            headers={"Content-Type": "application/json"},
+            timeout=5,
+        ).json()
+        key_b64 = lic["keys"][0]["k"]
+        return _b64.urlsafe_b64decode(padding(key_b64)).hex()
     except Exception:
         return ""
 
 
-# ---------------------------------------------------------------------------
-# OAuth2 device flow
-# ---------------------------------------------------------------------------
+# ── Progress helpers ──────────────────────────
 
-def start_device_flow_sync() -> dict:
-    """Start OAuth2 device flow. Returns {device_code, user_code, verification_url, interval, expires_in}."""
-    data = urllib.parse.urlencode({
-        "client_id": GOOGLE_CLIENT_ID,
-        "scope":     " ".join(_SCOPES),
-    }).encode()
-    req = urllib.request.Request(
-        _DEVICE_AUTH_URL, data=data,
-        headers={"Content-Type": "application/x-www-form-urlencoded",
-                 "User-Agent":   "Mozilla/5.0"},
-    )
-    with urllib.request.urlopen(req, timeout=15) as r:
-        return json.loads(r.read())
-
-
-def _poll_token_sync(device_code: str) -> Optional[dict]:
-    """Poll for token. Returns token dict if authorized, None if still pending."""
-    data = urllib.parse.urlencode({
-        "client_id":     GOOGLE_CLIENT_ID,
-        "client_secret": GOOGLE_CLIENT_SECRET,
-        "device_code":   device_code,
-        "grant_type":    _GRANT_TYPE_DEV,
-    }).encode()
-    req = urllib.request.Request(
-        _TOKEN_URL, data=data,
-        headers={"Content-Type": "application/x-www-form-urlencoded",
-                 "User-Agent":   "Mozilla/5.0"},
-    )
+def _read_ffmpeg_progress(progress_file: str) -> dict:
+    """Read FFmpeg -progress file and return latest key=value pairs."""
+    if not os.path.exists(progress_file):
+        return {}
     try:
-        with urllib.request.urlopen(req, timeout=15) as r:
-            resp = json.loads(r.read())
-            return resp if "access_token" in resp else None
-    except urllib.error.HTTPError as e:
-        body = json.loads(e.read())
-        err  = body.get("error", "")
-        if err in ("authorization_pending", "slow_down"):
-            return None
-        raise Exception(f"OAuth2 error: {err} — {body.get('error_description', '')}")
-
-
-async def poll_and_save_token(client, user_id: int, device_code: str,
-                               interval: int, expires_in: int):
-    """Background task: polls until user authorizes or code expires."""
-    deadline = time.time() + expires_in
-    while time.time() < deadline:
-        await asyncio.sleep(max(interval, 5))
-        try:
-            tok = await asyncio.to_thread(_poll_token_sync, device_code)
-        except Exception as e:
-            LOG.error(f"GDrive OAuth poll error uid={user_id}: {e}")
-            try:
-                await client.send_message(user_id, f"❌ Google Drive auth failed: `{e}`")
-            except Exception:
-                pass
-            return
-        if tok:
-            _save_token(user_id, tok)
-            LOG.info(f"GDrive OAuth token saved for uid={user_id}")
-            try:
-                await client.send_message(
-                    user_id,
-                    "✅ **Google Drive Connected!**\n\n"
-                    "Ab aapki recordings automatically **aapki Google Drive** par upload hongi.\n\n"
-                    "Disconnect karne ke liye: /googledrive disconnect\n"
-                    "Status dekhne ke liye: /googledrive status",
-                )
-            except Exception:
-                pass
-            return
-    try:
-        await client.send_message(
-            user_id,
-            "⏰ **Google Drive auth timeout.**\n\n"
-            "Code expire ho gaya. Fir se try karein: /googledrive"
-        )
-    except Exception:
-        pass
-
-
-# ---------------------------------------------------------------------------
-# Drive service builders
-# ---------------------------------------------------------------------------
-
-def _build_user_service(user_id: int):
-    from google.oauth2.credentials import Credentials
-    from google.auth.transport.requests import Request as GoogleRequest
-    from googleapiclient.discovery import build
-
-    tok   = _load_token(user_id)
-    creds = Credentials(
-        token         = tok.get("access_token"),
-        refresh_token = tok.get("refresh_token"),
-        token_uri     = _TOKEN_URL,
-        client_id     = GOOGLE_CLIENT_ID,
-        client_secret = GOOGLE_CLIENT_SECRET,
-        scopes        = _SCOPES,
-    )
-    if not creds.valid and creds.refresh_token:
-        creds.refresh(GoogleRequest())
-        _save_token(user_id, {
-            "access_token":  creds.token,
-            "refresh_token": creds.refresh_token,
-        })
-    return build("drive", "v3", credentials=creds, cache_discovery=False)
-
-
-def _build_sa_service():
-    from google.oauth2 import service_account
-    from googleapiclient.discovery import build
-    sa_info = json.loads(GDRIVE_SA_JSON)
-    creds   = service_account.Credentials.from_service_account_info(sa_info, scopes=_SCOPES)
-    return build("drive", "v3", credentials=creds, cache_discovery=False)
-
-
-# ---------------------------------------------------------------------------
-# Upload
-# ---------------------------------------------------------------------------
-
-def _upload_sync(file_path: str, filename: str, folder_id: Optional[str],
-                 user_id: Optional[int]) -> str:
-    from googleapiclient.http import MediaFileUpload
-
-    if user_id and is_user_connected(user_id):
-        service = _build_user_service(user_id)
-        meta    = {"name": filename}
-        if folder_id:
-            meta["parents"] = [folder_id]
-    else:
-        service = _build_sa_service()
-        meta    = {"name": filename, "parents": [folder_id or GDRIVE_FOLDER_ID]}
-
-    mime_type = "video/x-matroska" if filename.endswith(".mkv") else "video/mp4"
-    media     = MediaFileUpload(file_path, mimetype=mime_type, resumable=True)
-    f = service.files().create(
-        body=meta, media_body=media, fields="id,webViewLink"
-    ).execute()
-    link = f.get("webViewLink") or f"https://drive.google.com/file/d/{f['id']}/view"
-    LOG.info(f"GDrive upload done: {filename} → {link}")
-    return link
-
-
-async def upload_and_notify(client, chat_id: int, file_path: str, filename: str, status_msg=None):
-    """Upload to Drive (user tokens preferred, SA as fallback) and send the link."""
-    user_connected = is_user_connected(chat_id)
-    if not user_connected and not _sa_enabled():
-        return
-    task_id = _upload_task_id(file_path)
-    try:
-        total = os.path.getsize(file_path) if os.path.exists(file_path) else 0
-        progress_text = _fmt_upload_progress_box(
-            "Uploading to Google Drive", 0, total or 1, 0, 0, task_id, compact=True
-        )
-        target = status_msg or await client.send_message(chat_id, progress_text)
-        try:
-            await target.edit_text(progress_text)
-        except Exception:
-            pass
-
-        folder_id = None if user_connected else GDRIVE_FOLDER_ID
-        link = await asyncio.to_thread(
-            _upload_sync, file_path, filename, folder_id, chat_id
-        )
-        final = (
-            f"✅ Uploaded to Google Drive\n"
-            f"🔗 [Drive Link Ready]({link})"
-        )
-        try:
-            await target.edit_text(final, disable_web_page_preview=True)
-        except Exception:
-            await client.send_message(chat_id, final, disable_web_page_preview=True)
-    except Exception as e:
-        LOG.error(f"GDrive upload failed for {filename}: {e}")
-        try:
-            await client.send_message(chat_id, f"⚠️ Google Drive upload failed: `{e}`")
-        except Exception:
-            pass
-
-
-async def _run_upload_destination(client, user_id: int, dest: str, status_msg, out_path: str,
-                                   caption: str, duration, thumb_path=None, save_dir=None,
-                                   was_cancelled: bool = False):
-    """
-    Execute the chosen upload destination(s) with matching progress/completion UI.
-    dest: 'tg' (Telegram only) / 'gd' (Drive only) / 'both' (Drive then Telegram).
-    """
-    filename = os.path.basename(out_path)
-
-    if dest == "tg":
-        upload_start = time.time()
-        await split_and_send_video(
-            status_msg, out_path, caption, int(duration),
-            thumb_path=thumb_path, status_msg=status_msg,
-            progress=progress_for_pyrogram,
-            progress_args=(status_msg, upload_start, status_msg, save_dir, was_cancelled),
-            _uid=user_id, _chat_id=status_msg.chat.id,
-        )
-    elif dest == "gd":
-        await upload_and_notify(client, status_msg.chat.id, out_path, filename, status_msg=status_msg)
-    elif dest == "both":
-        # Sequential terse log: Drive first, then Telegram, growing into one final message.
-        user_connected = is_user_connected(status_msg.chat.id)
-        drive_available = user_connected or _sa_enabled()
-
-        log_lines = ["🚀 Uploading to Drive..."]
-        try:
-            await status_msg.edit_text("\n".join(log_lines))
-        except Exception:
-            pass
-
-        if drive_available:
-            try:
-                folder_id = None if user_connected else GDRIVE_FOLDER_ID
-                await asyncio.to_thread(
-                    _upload_sync, out_path, filename, folder_id, status_msg.chat.id
-                )
-                log_lines.append("✅ Drive Upload Complete")
-            except Exception as e:
-                LOG.error(f"GDrive upload failed for {filename}: {e}")
-                log_lines.append("⚠️ Drive Upload Failed")
-        else:
-            log_lines.append("⚠️ Drive Upload Skipped (not connected)")
-
-        log_lines.append("")
-        log_lines.append("🚀 Uploading to Telegram...")
-        try:
-            await status_msg.edit_text("\n".join(log_lines))
-        except Exception:
-            pass
-
-        upload_start = time.time()
-        await split_and_send_video(
-            status_msg, out_path, caption, int(duration),
-            thumb_path=thumb_path, status_msg=status_msg,
-            progress=progress_for_pyrogram,
-            progress_args=(status_msg, upload_start, status_msg, save_dir, was_cancelled),
-            _uid=user_id, _chat_id=status_msg.chat.id,
-        )
-
-        log_lines.append("✅ Telegram Upload Complete")
-        log_lines.append("")
-        log_lines.append("🎉 Job Finished")
-        try:
-            await status_msg.edit_text("\n".join(log_lines))
-        except Exception:
-            pass
-
-
-# ===========================================================================
-# Quota & limit system (merged from limit_system.py)
-# ===========================================================================
-
-"""
-Quota & daily verification limit system.
-
-Data file: <DATA_DIRECTORY>/user_limits.json
-Schema per user:
-  {
-    "rec_limit":    int,   -- current recording credits
-    "verify_left":  int,   -- verifications remaining this cycle (max 10)
-    "verify_done":  int,   -- verifications completed this cycle
-    "is_lucky":     bool,  -- lucky user flag (set once at creation, ~20% chance)
-    "last_refresh": float, -- unix timestamp of last quota auto-reset
-    "first_time":   bool,  -- True until user first interacts
-  }
-"""
-
-import json
-import os
-import random
-import time
-
-
-# ── Tunable constants ────────────────────────────────────────────────────────
-
-DEFAULT_REC_LIMIT   = 1        # credits a brand-new user starts with
-DEFAULT_VERIFY_LEFT = 10       # verifications allowed per 12-hour cycle
-LUCKY_RATIO         = 5        # 1 in 5 users is "lucky" (~20%)
-REFRESH_SECONDS     = 12 * 3600
-
-# Reward table — indexed by verify_done count (clamped to last entry)
-# result_rec : absolute value to set rec_limit to after this verify
-VERIFY_STEPS = [
-    {"result_rec": 4, "msg": "🎉 Pehli baar verify! Aapko **Rec 4** mil gaye!"},
-    {"result_rec": 3, "msg": "✅ Verify bonus! Aapki limit: **Rec 3**"},
-    {"result_rec": 3, "msg": "✅ Verify bonus! Aapki limit: **Rec 3**"},
-    {"result_rec": 4, "msg": "🌟 Lucky Step! Aapki limit: **Rec 4**"},
-    {"result_rec": 3, "msg": "✅ Verify bonus! Aapki limit: **Rec 3**"},
-    {"result_rec": 3, "msg": "✅ Verify bonus! Aapki limit: **Rec 3**"},
-    {"result_rec": 4, "msg": "🌟 Lucky Step! Aapki limit: **Rec 4**"},
-    {"result_rec": 3, "msg": "✅ Verify bonus! Aapki limit: **Rec 3**"},
-    {"result_rec": 3, "msg": "✅ Verify bonus! Aapki limit: **Rec 3**"},
-    {"result_rec": 3, "msg": "✅ Last verify! Aapki limit: **Rec 3**"},
-]
-
-
-# ── Internal helpers ─────────────────────────────────────────────────────────
-
-def _limit_file() -> str:
-    return os.path.join(DATA_DIRECTORY, "user_limits.json")
-
-
-def _load() -> dict:
-    try:
-        with open(_limit_file(), "r") as f:
-            return json.load(f)
+        with open(progress_file, "r") as f:
+            data = {}
+            for line in f:
+                line = line.strip()
+                if "=" in line:
+                    k, _, v = line.partition("=")
+                    data[k.strip()] = v.strip()
+        return data
     except Exception:
         return {}
 
 
-def _save(data: dict) -> None:
-    os.makedirs(DATA_DIRECTORY, exist_ok=True)
-    with open(_limit_file(), "w") as f:
-        json.dump(data, f, indent=2)
-
-
-def _new_record() -> dict:
-    return {
-        "rec_limit":    DEFAULT_REC_LIMIT,
-        "verify_left":  DEFAULT_VERIFY_LEFT,
-        "verify_done":  0,
-        "is_lucky":     random.random() < (1.0 / LUCKY_RATIO),
-        "last_refresh": time.time(),
-        "joined_at":    time.time(),
-        "first_time":   True,
-    }
-
-
-def _maybe_refresh(user: dict) -> dict:
-    """Auto-reset if 12 hours have passed since last refresh."""
-    if time.time() - user.get("last_refresh", 0) >= REFRESH_SECONDS:
-        user["rec_limit"]    = 3 if user.get("is_lucky") else 0
-        user["verify_left"]  = DEFAULT_VERIFY_LEFT
-        user["verify_done"]  = 0
-        user["last_refresh"] = time.time()
-    return user
-
-
-# ── Public API ───────────────────────────────────────────────────────────────
-
-def get_user(user_id: int) -> dict:
-    """Return the user's quota record, creating and auto-refreshing as needed."""
-    data = _load()
-    uid  = str(user_id)
-    if uid not in data:
-        data[uid] = _new_record()
-        _save(data)
-        return dict(data[uid])
-    data[uid] = _maybe_refresh(data[uid])
-    _save(data)
-    return dict(data[uid])
-
-
-def use_rec(user_id: int) -> tuple:
-    """
-    Consume 1 recording credit.
-    Returns (True, info_msg) on success or (False, error_msg) when out of credits.
-    """
-    data = _load()
-    uid  = str(user_id)
-    if uid not in data:
-        data[uid] = _new_record()
-    user = _maybe_refresh(data[uid])
-    if user["rec_limit"] <= 0:
-        data[uid] = user
-        _save(data)
-        return False, (
-            "❌ **Rec limit khatam ho gayi!**\n\n"
-            "Use /verify to get more recording credits.\n"
-            "Use /limit to check your current status."
-        )
-    user["rec_limit"] -= 1
-    user["first_time"]  = False
-    data[uid] = user
-    _save(data)
-    return True, f"✅ 1 Rec used. Remaining: **Rec {user['rec_limit']}**"
-
-
-def apply_verify_bonus(user_id: int) -> tuple:
-    """
-    Grant recording credits for a completed ad-click verification.
-    Returns (True, reward_msg) or (False, error_msg).
-    """
-    data = _load()
-    uid  = str(user_id)
-    if uid not in data:
-        data[uid] = _new_record()
-    user = _maybe_refresh(data[uid])
-
-    if user["verify_left"] <= 0:
-        data[uid] = user
-        _save(data)
-        elapsed     = time.time() - user.get("last_refresh", time.time())
-        remaining_s = max(REFRESH_SECONDS - elapsed, 0)
-        rh = int(remaining_s // 3600)
-        rm = int((remaining_s % 3600) // 60)
-        return False, (
-            f"🚫 **Aaj ke liye sab verifications lock ho gaye!**\n"
-            f"⏱️ Refresh in: **{rh}h {rm}m**"
-        )
-
-    step_idx          = min(user["verify_done"], len(VERIFY_STEPS) - 1)
-    step              = VERIFY_STEPS[step_idx]
-    bonus             = 1 if user.get("is_lucky") else 0
-    user["rec_limit"] = step["result_rec"] + bonus
-    user["verify_left"] = max(0, user["verify_left"] - 1)
-    user["verify_done"] += 1
-    user["first_time"]  = False
-    data[uid] = user
-    _save(data)
-
-    msg = step["msg"]
-    if bonus:
-        msg += "\n⭐ **Lucky Bonus:** +1 extra Rec!"
-    msg += (
-        f"\n\n🎯 **Total: Rec {user['rec_limit']}** "
-        f"| Verify left: **{user['verify_left']}**"
-    )
-    return True, msg
-
-
-def format_limit_message(user_id: int) -> str:
-    """Return the full /limit status block for this user."""
-    user      = get_user(user_id)
-    rec       = user["rec_limit"]
-    v_left    = user["verify_left"]
-    v_done    = user["verify_done"]
-    is_lucky  = user.get("is_lucky", False)
-    is_first  = user.get("first_time", False)
-    is_locked = v_left <= 0
-
-    elapsed     = time.time() - user.get("last_refresh", time.time())
-    remaining_s = max(REFRESH_SECONDS - elapsed, 0)
-    rh = int(remaining_s // 3600)
-    rm = int((remaining_s % 3600) // 60)
-    refresh_str = f"{rh}h {rm}m" if remaining_s > 0 else "Abhi refresh hoga! 🔄"
-
-    if is_locked:
-        verify_line = "⚠️ **VERIFY NO USE** — Aaj ki limit lock hai!"
-    elif is_first:
-        verify_line = "👉 Pehli baar verify karne par aapka quota unlock ho jayega!"
-    else:
-        verify_line = "👉 Verify karein aur aur Rec paaein!"
-
-    lucky_line = "⭐ **Lucky User:** Refresh ke baad Rec 3 milega!\n" if is_lucky else ""
-
-    step_labels = [
-        ("1️⃣", "First Use  ➔ Verify 2", "(Aapko milenge +Rec 4)"),
-        ("2️⃣", "Second Use ➔ Verify 1", "(Aapki limit ghatkar hogi: Rec 3)"),
-        ("3️⃣", "Dobara Use ➔ Verify 1", "(Aapki limit aur ghatkar hogi: Rec 3)"),
-        ("4️⃣", "Third Use  ➔ Verify 10", "(Lock 🚫 Today Limit Expired)"),
-    ]
-
-    flow_lines = []
-    for i, (num, action, reward) in enumerate(step_labels):
-        if i < v_done:
-            prefix = "✅"
-        elif i == v_done and not is_locked:
-            prefix = "▶️"
-        else:
-            prefix = num
-        flow_lines.append(f"  {prefix} {action} {reward}")
-
-    return (
-        "📊 **BOT VERIFICATION STATUS** 📊\n"
-        "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"👤 **Your Current Limit:** Rec {rec}\n"
-        "Aap iska use kar sakte hain:\n"
-        "👉 `/rec LINK 00:00:30 Filename`\n"
-        f"🆓 **Remaining Verify Limit:** {v_left} Verification\n"
-        f"{verify_line}\n"
-        f"{lucky_line}"
-        "🔢 **Countdown Flow & Rewards:**\n"
-        + "\n".join(flow_lines) + "\n\n"
-        "🌅 **SURPRISE GIFT (Lucky User):**\n"
-        "Every 20% users mein se 1 lucky user ko extra badal-badal kar rewards milenge!\n\n"
-        f"⏱️ **Daily Refresh Timer:** {refresh_str}\n"
-        "🔄 Har 12 ghante me system fresh ho jayega. "
-        "Normal users ka Rec 0 hoga, par Lucky User ka balance Rec 3 rahega!"
-    )
-
-
-# =============================================================================
-# Command handlers (merged from command.py)
-# =============================================================================
-
-# ---------------------------------------------------------------------------
-# Module-level state for ad-click verify flow
-# ---------------------------------------------------------------------------
-
-# {user_id: {"short_url": str, "expires": float}}
-pending_verify: dict = {}
-
-_VERIFY_LINK_TTL = 300  # seconds before link expires and a new one is generated
-
-
-# ---------------------------------------------------------------------------
-# shortxlinks.in URL shortener (sync wrapped in asyncio.to_thread)
-# ---------------------------------------------------------------------------
-
-def _shrink2_sync(api_url: str):
+def _progress_int(value, default: int = 0) -> int:
+    """Parse FFmpeg progress numbers; fields can legally be reported as N/A."""
     try:
-        req = urllib.request.Request(api_url, headers={"User-Agent": "Mozilla/5.0"})
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            data = json.loads(resp.read())
-            if data.get("status") == "success" and data.get("shortenedUrl"):
-                return data["shortenedUrl"]
-    except Exception:
-        pass
-    return None
-
-
-async def _shrink2(long_url: str) -> str:
-    """Shorten via shortxlinks.in. Returns the short URL, or the original on failure."""
-    key     = SHRINKME_API_KEY
-    encoded = urllib.parse.quote(long_url, safe=":/?&=%")
-    api_url = f"https://shortxlinks.in/api?api={key}&url={encoded}"
-    try:
-        short = await asyncio.to_thread(_shrink2_sync, api_url)
-        if short:
-            return short
-    except Exception:
-        pass
-    return long_url  # fallback: show original link
-
-
-# ---------------------------------------------------------------------------
-# Shared helpers for text
-# ---------------------------------------------------------------------------
-
-HELP_TEXT = f"""
-**{BRAND_TITLE} — Help & Commands**
-
-━━━━━━━━━━━━━━━━━━━━━━━
-🎬 **FFmpeg Tools**
-━━━━━━━━━━━━━━━━━━━━━━━
-
-❌ Free Users: Not Allowed
-✅ Premium / Admin / Owner: Allowed
-
-• `/ffmpeg` — Direct FFmpeg command.
-• `/ffprobe` — Direct FFprobe command.
-
-━━━━━━━━━━━━━━━━━━━━━━━
-🎞️ **Video Tools**
-━━━━━━━━━━━━━━━━━━━━━━━
-
-❌ Free Users: Not Allowed
-✅ Premium / Admin / Owner: Allowed
-
-• `/compress` — Reply to a video to compress it.
-• `/screenshot` or `/ss` — Reply to a video to extract screenshots.
-• `/trim HH:MM:SS HH:MM:SS` — Trim a clip.
-
-Example: `/trim 00:01:00 00:03:30`
-
-• `/merge` — Start multi-video merge session.
-• `/merge_done` — Finish merge session.
-• `/watermark` — Reply to a video → Burn watermark (last 2 min, bottom-right).
-• `/audiotrack` — Reply to a video → Lock audio track metadata instantly (No re-encode).
-
-━━━━━━━━━━━━━━━━━━━━━━━
-📹 **Recording**
-━━━━━━━━━━━━━━━━━━━━━━━
-
-❌ Free Users: Not Allowed
-✅ Verify / Premium / Admin / Owner: Allowed
-
-• `/rec HH:MM:SS`
-Record HLS/M3U8/DASH stream with wizard.
-
-• `/drec HH:MM:SS [filename] [flags]`
-Direct record without wizard.
-
-• `/reclink HH:MM:SS`
-Auto extract stream from any webpage.
-
-• Send any `.m3u8` URL directly for quick recording.
-
-**Optional Flags**
-
-`-aes`       AES-128 decryption key (HLS)
-`-cookie`    Cookie header
-`-ua`        User-Agent
-`-referer`   Referer header
-`-origin`    Origin header
-`-license`   ClearKey DRM license URL (MPD/DASH)
-
-CloudPlay multi-line format is also supported.
-
-━━━━━━━━━━━━━━━━━━━━━━━
-📥 **OTT Download**
-━━━━━━━━━━━━━━━━━━━━━━━
-
-❌ Free Users: Not Allowed
-✅ Verify / Premium / Admin / Owner: Allowed
-
-• `/download [filename]`
-
-Supported OTT:
-• Hotstar
-• JioCinema
-• ZEE5
-• SonyLIV
-
-━━━━━━━━━━━━━━━━━━━━━━━
-☁️ **Google Drive**
-━━━━━━━━━━━━━━━━━━━━━━━
-
-❌ Free Users: Not Allowed
-✅ Verify / Premium / Admin / Owner: Allowed
-
-• `/gdrive` or `/googledrive`
-Connect your Google Drive.
-
-• `/drivelogout`
-Disconnect your Drive account.
-
-━━━━━━━━━━━━━━━━━━━━━━━
-🍪 **Cookies (OTT Login)**
-━━━━━━━━━━━━━━━━━━━━━━━
-
-❌ Free Users: Not Allowed
-✅ Verify / Premium / Admin / Owner: Allowed
-
-• `/set_cookies`
-Upload cookies.txt (Netscape format).
-
-• `/cookies_status`
-Show stored cookies.
-
-• `/del_cookies`
-Delete stored cookies.
-
-━━━━━━━━━━━━━━━━━━━━━━━
-📡 **JioTV Catchup**
-━━━━━━━━━━━━━━━━━━━━━━━
-
-✅ Verify / Premium / Admin / Owner: Allowed
-
-• `/jiostatus` — Login status check
-• `/channels [search]` — Channel list browse karo
-• `/jiorec` — JioTV live record wizard
-• `/dl -Jiotv -c ChannelName -t DD-MM-YYYY HH:MM AM/PM - HH:MM AM/PM -n File`
-Download catchup recording
-
-━━━━━━━━━━━━━━━━━━━━━━━
-📊 **Status & Control**
-━━━━━━━━━━━━━━━━━━━━━━━
-
-❌ Free Users: Not Allowed
-✅ Verify / Premium / Admin / Owner: Allowed
-
-• `/status` or `/statusme`
-Show current recording/job status.
-
-• `/cancel` or `/cancelme`
-Cancel active recording/job.
-
-━━━━━━━━━━━━━━━━━━━━━━━
-👥 **General Commands**
-━━━━━━━━━━━━━━━━━━━━━━━
-
-✅ Free / Verify / Premium / Admin / Owner: Allowed
-
-• `/start` — Welcome message.
-• `/help` — Show help menu.
-• `/plan` — Subscription plans.
-• `/contact` — Support contact.
-• `/channel` — Browse available channels.
-• `/rec <name|url> HH:MM:SS` — Record via wizard.
-• `/drec <name|url> HH:MM:SS` — Record instantly, no wizard.
-• `/search` — Search channels.
-• `/verify` — Request verification.
-• `/limit` — Check recording quota.
-
-"""
-
-_OWNER_HELP_TEXT = """
-━━━━━━━━━━━━━━━━━━━━━━━
-👑 **Owner Commands**
-━━━━━━━━━━━━━━━━━━━━━━━
-
-🔒 Hidden from Free / Verify / Premium / Admin Users
-
-**Branding**
-
-• `/updatewatermark`
-Change default watermark text.
-
-• `/audionameupdate`
-Change embedded audio track brand name.
-
-**User Management**
-
-• `/stats`
-Bot statistics + new users last 3 days.
-
-• `/broadcast`
-Send message to all users.
-
-• `/approve [days]`
-Approve a user manually.
-
-• `/revoke`
-Revoke user's access.
-
-• `/pending`
-Show pending verification requests.
-
-**Admin Management**
-
-• `/admin_add`
-Add admin.
-
-• `/admin_delete`
-Remove admin.
-
-• `/admin_list`
-List all admins.
-
-**Premium Management**
-
-• `/premium_add`
-Add premium plan.
-
-• `/premium_expire`
-Remove premium plan.
-
-• `/premium_list`
-List all premium users.
-
-**JioTV Login (Owner Only)**
-
-• `/login <10-digit mobile>`
-Start JioTV login — OTP aayega phone pe.
-
-• `/otp <6-digit code>`
-Submit OTP to complete JioTV login.
-
-• `/jiostatus`
-Check JioTV login status.
-
-• `/channels [search]`
-Browse JioTV channel list.
-"""
-
-
-def _make_start_kb() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📖 Help",       callback_data="show_help"),
-         InlineKeyboardButton("💎 Plans",      callback_data="show_plans")],
-        [InlineKeyboardButton("📡 Channels",   callback_data="show_channels"),
-         InlineKeyboardButton("✅ Get Verified", callback_data="show_verify")],
-    ])
-
-
-# ---------------------------------------------------------------------------
-# /start
-# ---------------------------------------------------------------------------
-
-@app.on_message(filters.command("start") & AUTH)
-async def start_cmd(client: Client, message: Message):
-    uid  = message.from_user.id
-    name = message.from_user.first_name or "User"
-
-    # ── Deep-link: /start vfy_{uid}  (user came via shortxlinks.in ad click) ──
-    param = message.command[1] if len(message.command) > 1 else ""
-    if param.startswith("vfy_"):
-        claimed_uid = int(param[4:]) if param[4:].isdigit() else 0
-        if claimed_uid != uid:
-            return await message.reply_text(
-                "⚠️ Yeh verification link aapke liye nahi hai.\n"
-                "Apna link lene ke liye /verify karein."
-            )
-        if is_owner(uid):
-            return await message.reply_text(
-                "👑 **Owner account — unlimited access!** No quota needed."
-            )
-        ok, reward_msg = apply_verify_bonus(uid)
-        if ok:
-            # Auto-add to verified.json so other commands work
-            vdata = load_verified()
-            if str(uid) not in vdata.setdefault("verified", {}):
-                vdata["verified"][str(uid)] = {
-                    "approved_by": "self_verify",
-                    "approved_at": datetime.now(tz).isoformat(),
-                }
-                save_verified(vdata)
-            pending_verify.pop(uid, None)
-            return await message.reply_text(
-                f"✅ **Verification Successful!**\n\n"
-                f"{reward_msg}\n\n"
-                "Use `/rec <url> HH:MM:SS <filename>` to start recording.\n"
-                "Use /limit to check your full quota status.",
-                disable_web_page_preview=True,
-            )
-        else:
-            return await message.reply_text(
-                f"⚠️ **Verification failed:**\n{reward_msg}\n\nUse /limit to check status."
-            )
-
-    # ── Normal /start ─────────────────────────────────────────────────────────
-    await message.reply_text(
-        f"👋 Hello, **{name}**!\n\n"
-        f"Welcome to **{BRAND_TITLE}**.\n\n"
-        f"I can record HLS / M3U8 streams and download from OTT platforms.\n\n"
-        f"📧 Support: @{SUPPORT_USERNAME}\n\n"
-        f"Use the buttons below to get started:",
-        reply_markup=_make_start_kb(),
-    )
-
-
-# ---------------------------------------------------------------------------
-# /help
-# ---------------------------------------------------------------------------
-
-# ---------------------------------------------------------------------------
-# /myid — universal debug command, bypasses ALL gates (group=-2)
-# Anyone can use this to find their Telegram user ID
-# ---------------------------------------------------------------------------
-
-@app.on_message(filters.command(["myid", "id", "whoami"]), group=-2)
-async def myid_cmd(client: Client, message: Message):
-    uid  = message.from_user.id if message.from_user else 0
-    name = (message.from_user.first_name or "User") if message.from_user else "Unknown"
-    role = "👑 Owner" if is_owner(uid) else ("🛡 Admin" if is_admin(uid) else ("✅ Auth User" if uid in (AUTH_USERS or []) else "👤 Regular User"))
-    await message.reply_text(
-        f"👤 **{name}**\n"
-        f"🆔 Your Telegram ID: `{uid}`\n"
-        f"🔑 Role: {role}\n\n"
-        f"📋 OWNER_IDS loaded: `{len(OWNER_IDS)}` ID(s)\n"
-        f"📋 AUTH_USERS loaded: `{len(AUTH_USERS)}` ID(s)"
-    )
-    message.stop_propagation()
-
-
-# ---------------------------------------------------------------------------
-# Group membership gate — runs BEFORE all other handlers (group=-1)
-# ---------------------------------------------------------------------------
-
-@app.on_message(filters.group, group=-1)
-async def _group_chat_gate(client: Client, message: Message):
-    """
-    In group chats: only respond inside the configured GROUP_CHAT_ID.
-    If GROUP_CHAT_ID is 0 (not set), allow all groups.
-    Owner/admin messages in any group always pass.
-    """
-    uid = message.from_user.id if message.from_user else 0
-    if is_owner(uid) or is_admin(uid):
-        return
-    if GROUP_CHAT_ID and message.chat.id != GROUP_CHAT_ID:
-        message.stop_propagation()
-
-
-@app.on_message(filters.private, group=-1)
-async def _group_gate(client: Client, message: Message):
-    uid = message.from_user.id
-
-    # Owner / Admin — full DM access
-    if is_owner(uid) or is_admin(uid):
-        return
-
-    # Always let these pass regardless of role (informational / auth commands)
-    text = (message.text or message.caption or "").strip().lower()
-    _DM_ALLOWED_PREFIXES = (
-        "/start", "/help",                          # welcome & help
-        "/verify", "/vfy",                          # OTP verification
-        "/plan", "/limit",                          # subscription info
-        "/statusme", "/cancelme",                   # job status
-        "/gdrive", "/drivelogout",                  # Drive OAuth flow
-        "/set_cookies", "/cookies_status", "/del_cookies",  # cookies mgmt
-        # JioTV commands (must pass group gate)
-        "/login", "/otp", "/channels", "/jiorec",
-        "/jiostatus", "/jiotvlogin", "/jiotvotp",
-        "/jiotvchannels", "/jiotvlogout",
-        "/dl", "/dlhelp",
-        # Quick /di command
-        "/di",
-    )
-    if any(text.startswith(p) for p in _DM_ALLOWED_PREFIXES):
-        return
-
-    # All other users (including AUTH_USERS) → DM blocked, redirect to Group
-    join_link = GROUP_INVITE_LINK or "https://t.me/+ww77CDQwoigzYjk1"
-    kb = InlineKeyboardMarkup([[
-        InlineKeyboardButton("👥 Group Mein Jao", url=join_link)
-    ]])
-    await message.reply_text(
-        "🚫 **DM mein commands allowed nahi hain.**\n\n"
-        "Yeh bot sirf **Group** mein use hota hai.\n"
-        "Neeche button se group join karein aur wahan commands chalayein.",
-        reply_markup=kb,
-    )
-    message.stop_propagation()
-
-
-# ---------------------------------------------------------------------------
-# /Group <ID> [update] — owner sets/updates the GROUP_CHAT_ID at runtime
-# ---------------------------------------------------------------------------
-
-@app.on_message(filters.command(["Group", "group", "setgroup"]))
-async def set_group_cmd(client: Client, message: Message):
-    """Owner-only: /Group <chat_id>  — set the bot's group at runtime."""
-    global GROUP_CHAT_ID, GROUP_INVITE_LINK
-    uid = message.from_user.id
-    if not (is_owner(uid) or is_admin(uid)):
-        return await message.reply_text("❌ Only owner/admin can use this command.")
-
-    args = message.command
-    # /Group  (no args) — show current
-    if len(args) < 2:
-        gid  = GROUP_CHAT_ID or "not set"
-        link = GROUP_INVITE_LINK or "not set"
-        return await message.reply_text(
-            f"📌 **Current Group Config**\n\n"
-            f"🆔 Group ID : `{gid}`\n"
-            f"🔗 Invite link: {link}\n\n"
-            f"**To set:** `/Group -100123456789`\n"
-            f"**To set with link:** `/Group -100123456789 https://t.me/+invite`\n"
-            f"**To clear:** `/Group 0`"
-        )
-
-    # /Group <id> [invite_link]
-    try:
-        new_id = int(args[1])
-    except ValueError:
-        return await message.reply_text("❌ Invalid group ID. Use a numeric ID like `-100123456789`.")
-
-    new_link = GROUP_INVITE_LINK  # keep old link unless provided
-    if len(args) >= 3:
-        new_link = args[2]
-
-    GROUP_CHAT_ID   = new_id
-    GROUP_INVITE_LINK = new_link
-    _save_group_config()
-
-    if new_id == 0:
-        return await message.reply_text("✅ Group gate **disabled** — bot responds to everyone.")
-
-    # Try to fetch group title for confirmation
-    try:
-        chat = await client.get_chat(new_id)
-        title = chat.title or str(new_id)
-    except Exception:
-        title = str(new_id)
-
-    await message.reply_text(
-        f"✅ **Group updated!**\n\n"
-        f"📌 Group : **{title}**\n"
-        f"🆔 ID     : `{new_id}`\n"
-        f"🔗 Link   : {new_link}\n\n"
-        f"Normal users must now be a member of this group to use the bot."
-    )
-
-
-# ---------------------------------------------------------------------------
-# /help
-# ---------------------------------------------------------------------------
-
-@app.on_message(filters.command("help") & AUTH)
-async def help_cmd(client: Client, message: Message):
-    uid = message.from_user.id
-    text = HELP_TEXT
-    if is_owner(uid) or is_admin(uid):
-        text = text + _OWNER_HELP_TEXT
-    await message.reply_text(text, disable_web_page_preview=True)
-
-
-# ---------------------------------------------------------------------------
-# /googledrive — per-user Google Drive OAuth2 connect / disconnect
-# ---------------------------------------------------------------------------
-
-@app.on_message(filters.command(["googledrive", "gdrive"]) & AUTH)
-async def googledrive_cmd(client: Client, message: Message):
-    user_id = message.from_user.id
-    args    = message.command[1:]
-    sub     = args[0].lower() if args else ""
-
-    # ── disconnect ────────────────────────────────────────────────────────
-    if sub == "disconnect":
-        if disconnect_user(user_id):
-            return await message.reply_text(
-                "✅ **Google Drive disconnected.**\n\n"
-                "Aapki future recordings Telegram par upload hongi.\n"
-                "Dobara connect karne ke liye: /googledrive"
-            )
-        return await message.reply_text(
-            "⚠️ Aapka Google Drive abhi connected nahi tha."
-        )
-
-    # ── status ────────────────────────────────────────────────────────────
-    if sub in ("status", "info"):
-        connected = is_user_connected(user_id)
-        sa_ready  = _gdrive_sa_enabled()
-        lines = ["☁️ **Google Drive Status**\n"]
-        lines.append(f"👤 Aapka account: {'✅ Connected' if connected else '❌ Not connected'}")
-        if sa_ready:
-            lines.append("🤖 Shared (service) account: ✅ Active (fallback)")
-        if not connected and not sa_ready:
-            lines.append("\n_Koi bhi Drive account configured nahi hai._")
-        if connected:
-            lines.append("\nDisconnect: /googledrive disconnect")
-        else:
-            lines.append("\nConnect: /googledrive")
-        return await message.reply_text("\n".join(lines))
-
-    # ── already connected ─────────────────────────────────────────────────
-    if is_user_connected(user_id):
-        return await message.reply_text(
-            "✅ **Google Drive Already Connected!**\n\n"
-            "Aapki recordings automatically **aapki Drive** par upload hongi.\n\n"
-            "🔹 Status: /googledrive status\n"
-            "🔹 Disconnect: /googledrive disconnect"
-        )
-
-    # ── OAuth2 not configured — show service-account info or error ────────
-    if not _gdrive_oauth_enabled():
-        if _gdrive_sa_enabled():
-            sa_email = get_sa_email()
-            return await message.reply_text(
-                "🤖 **Google Drive (Shared Account)**\n\n"
-                "Bot ek shared service account use karta hai uploads ke liye.\n\n"
-                f"📧 Service Account Email:\n`{sa_email}`\n\n"
-                "Apni Drive folder share karne ke liye:\n"
-                "1. Google Drive open karein\n"
-                "2. Folder par right-click → Share\n"
-                f"3. Upar wali email add karein as **Editor**\n\n"
-                "_Individual OAuth2 login ke liye owner se "
-                "`GOOGLE_CLIENT_ID` aur `GOOGLE_CLIENT_SECRET` set karne ko bolein._"
-            )
-        return await message.reply_text(
-            "⚠️ **Google Drive abhi configure nahi hai.**\n\n"
-            "Owner se yeh secrets set karne ko bolein:\n"
-            "• `GDRIVE_SA_JSON` + `GDRIVE_FOLDER_ID` (shared account)\n"
-            "• `GOOGLE_CLIENT_ID` + `GOOGLE_CLIENT_SECRET` (per-user login)"
-        )
-
-    # ── start OAuth2 device flow ──────────────────────────────────────────
-    wait_msg = await message.reply_text("🔗 Google Drive se connect kar raha hoon...")
-    try:
-        flow = await asyncio.to_thread(start_device_flow_sync)
-    except Exception as e:
-        LOG.error(f"GDrive device flow start failed uid={user_id}: {e}")
-        return await wait_msg.edit_text(f"❌ Google Drive connect nahi ho saka: `{e}`")
-
-    user_code        = flow["user_code"]
-    verification_url = flow.get("verification_url", "https://www.google.com/device")
-    device_code      = flow["device_code"]
-    interval         = int(flow.get("interval", 5))
-    expires_in       = int(flow.get("expires_in", 1800))
-
-    await wait_msg.edit_text(
-        "🤖 **Google Drive Connect Karein**\n\n"
-        f"**Step 1:** Yeh link kholo:\n{verification_url}\n\n"
-        f"**Step 2:** Yeh code enter karo:\n`{user_code}`\n\n"
-        "**Step 3:** Apna Google account select karein aur **Allow** karein.\n\n"
-        f"⏰ Code **{expires_in // 60} minutes** mein expire hoga.\n"
-        "_Jaise hi aap allow karein, bot automatically detect kar lega._"
-    )
-
-    asyncio.create_task(
-        poll_and_save_token(client, user_id, device_code, interval, expires_in)
-    )
-
-
-# ---------------------------------------------------------------------------
-# /Drivelogout — quick alias to disconnect Google Drive
-# ---------------------------------------------------------------------------
-
-@app.on_message(filters.command(["Drivelogout", "drivelogout", "gdrive_logout", "drivelog"]) & AUTH)
-async def drivelogout_cmd(client: Client, message: Message):
-    user_id = message.from_user.id
-    if disconnect_user(user_id):
-        await message.reply_text(
-            "✅ **Google Drive Disconnected!**\n\n"
-            "Aapki agli recordings Telegram par upload hongi.\n\n"
-            "Dobara connect karne ke liye: /googledrive"
-        )
-    else:
-        await message.reply_text(
-            "⚠️ Aapka Google Drive pehle se connected nahi tha.\n\n"
-            "Connect karne ke liye: /googledrive"
-        )
-
-
-# ---------------------------------------------------------------------------
-# /verify — ad-click self-service verification (shortxlinks.in)
-# ---------------------------------------------------------------------------
-
-@app.on_message(filters.command("verify") & AUTH)
-async def verify_cmd(client: Client, message: Message):
-    uid = message.from_user.id
-
-    if is_owner(uid):
-        return await message.reply_text(
-            "👑 **Owner account — unlimited recording access!**\n\n"
-            "Quota system does not apply to owners."
-        )
-
-    user = get_user(uid)
-
-    # Locked for today?
-    if user["verify_left"] <= 0:
-        elapsed     = time.time() - user.get("last_refresh", time.time())
-        remaining_s = max(REFRESH_SECONDS - elapsed, 0)
-        rh = int(remaining_s // 3600)
-        rm = int((remaining_s % 3600) // 60)
-        return await message.reply_text(
-            "🚫 **Aaj ke liye sab verifications lock ho gaye!**\n\n"
-            f"⏱️ Next refresh in: **{rh}h {rm}m**\n\n"
-            "Use /limit to check your full status."
-        )
-
-    # Reuse unexpired pending link or generate a fresh one
-    existing = pending_verify.get(uid)
-    if existing and existing.get("expires", 0) > time.time():
-        short_url    = existing["short_url"]
-        is_shortened = existing.get("is_shortened", False)
-    else:
-        target    = f"https://t.me/{BOT_USERNAME}?start=vfy_{uid}"
-        short_url = await _shrink2(target)
-        is_shortened = (short_url != target)
-        pending_verify[uid] = {
-            "short_url":    short_url,
-            "expires":      time.time() + _VERIFY_LINK_TTL,
-            "is_shortened": is_shortened,
-        }
-
-    v_left   = user["verify_left"]
-    step_idx = min(user["verify_done"], len(VERIFY_STEPS) - 1)
-    next_rec = VERIFY_STEPS[step_idx]["result_rec"]
-    bonus    = 1 if user.get("is_lucky") else 0
-
-    shrink_note = "" if is_shortened else (
-        "\n\n⚠️ _Ad-link generate nahi ho saka. Neeche diye link se seedha verify karein._"
-    )
-
-    kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton("🔗 Click to Verify", url=short_url)],
-    ])
-
-    await message.reply_text(
-        "🔐 **Verification Required**\n"
-        "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"Aage bot ka istemal karne aur **+Rec {next_rec + bonus}** ka quota unlock karne ke\n"
-        "liye neeche diye gaye **Click to Verify** button par click karein.\n\n"
-        "Ad dekhe ke baad aap bot par wapas aa jayenge aur automatically verify ho jayenge.\n"
-        "Agar automatic verify na ho to **I've Verified** button dabayein.\n\n"
-        "⚠️ _Yeh link sirf aapke liye hai — dusron ko share mat karein._\n"
-        "━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-        f"🆓 Remaining verifications today: **{v_left}** / {DEFAULT_VERIFY_LEFT}"
-        f"{shrink_note}",
-        reply_markup=kb,
-        disable_web_page_preview=True,
-    )
-
-
-@app.on_callback_query(filters.regex(r"^vrf:(\d+):done$"))
-async def vrf_done_cb(client: Client, cq: CallbackQuery):
-    uid = int(cq.data.split(":")[1])
-    if cq.from_user.id != uid:
-        return await cq.answer("Not your verification.", show_alert=True)
-
-    pending_verify.pop(uid, None)
-
-    ok, reward_msg = apply_verify_bonus(uid)
-
-    if ok:
-        # Auto-add to verified.json so other commands work without separate approval
-        vdata = load_verified()
-        if str(uid) not in vdata.setdefault("verified", {}):
-            vdata["verified"][str(uid)] = {
-                "approved_by": "self_verify",
-                "approved_at": datetime.now(tz).isoformat(),
-            }
-            save_verified(vdata)
-
-        await cq.answer("✅ Verified!", show_alert=False)
-        try:
-            await cq.message.edit_text(
-                f"✅ **Verification Successful!**\n\n"
-                f"{reward_msg}\n\n"
-                "Use `/rec <url> HH:MM:SS <filename>` to start recording.",
-                reply_markup=None,
-            )
-        except Exception:
-            try:
-                await client.send_message(
-                    uid,
-                    f"✅ **Verified!**\n\n{reward_msg}\n\n"
-                    "Use /rec to start recording.",
-                )
-            except Exception:
-                pass
-    else:
-        await cq.answer("🚫 Limit expired!", show_alert=True)
-        try:
-            await cq.message.edit_text(
-                f"{reward_msg}\n\nUse /limit to check your status.",
-                reply_markup=None,
-            )
-        except Exception:
-            pass
-
-
-# ---------------------------------------------------------------------------
-# Recording progress callbacks — Gen Preview / Refresh / Cancel
-# ---------------------------------------------------------------------------
-
-@app.on_callback_query(filters.regex(r"^rec_prev:(\d+):(\d+)$"))
-async def rec_preview_cb(client: Client, cq: CallbackQuery):
-    parts  = cq.data.split(":")
-    uid    = int(parts[1])
-    rec_id = int(parts[2])
-    if cq.from_user.id != uid:
-        return await cq.answer("Not your recording.", show_alert=True)
-    entry = active_recs.get(uid, {}).get(rec_id)
-    if not entry:
-        return await cq.answer("Recording finished or not found.", show_alert=True)
-    eff_url = entry.get("effective_url")
-    is_hls  = entry.get("is_hls", True)
-    save_dir = entry["status"]["save_dir"]
-    if not eff_url:
-        return await cq.answer("Stream URL not ready yet — try again in a moment.", show_alert=True)
-    await cq.answer("📸 Capturing live frame…")
-    snap_path = join(save_dir, f"snap_{int(time.time())}.jpg")
-    ok = await take_stream_snapshot(eff_url, snap_path, is_hls)
-    if not ok:
-        return await cq.message.reply_text("❌ Could not capture a frame from the stream right now.")
-    recording_start = entry["start"]
-    duration        = time_to_seconds(entry["status"]["target"])
-    elapsed         = time.time() - recording_start
-    pct             = min((elapsed / duration) * 100, 100) if duration > 0 else 0
-    bar             = "●" * int(10 * pct // 100) + "⬜" * (10 - int(10 * pct // 100))
-    task_id         = hex(rec_id)[2:10]
-    slot_n          = list(active_recs.get(uid, {}).keys()).index(rec_id) + 1
-    text = (
-        f"🎬 **Recording #{slot_n} in Progress...**\n\n"
-        f"📡 Stream Capture\n"
-        f"[{bar}]  {pct:.1f}%\n"
-        f"⏱ Time  : {TimeFormatter(int(elapsed*1000))} / {TimeFormatter(duration*1000)}\n"
-        f"🆔 Task  : {task_id}\n\n"
-        f"_Live preview — tap **Gen Preview** to refresh_"
-    )
-    kb = _rec_progress_kb(uid, rec_id)
-    try:
-        from pyrogram.types import InputMediaPhoto
-        await client.edit_message_media(
-            cq.message.chat.id, cq.message.id,
-            InputMediaPhoto(snap_path, caption=text),
-            reply_markup=kb,
-        )
-        active_recs[uid][rec_id]["is_photo_msg"] = True
-        active_recs[uid][rec_id]["snap_path"]    = snap_path
-    except Exception:
-        await cq.message.reply_photo(snap_path, caption=text, reply_markup=kb)
-
-
-@app.on_callback_query(filters.regex(r"^rec_ref:(\d+):(\d+)$"))
-async def rec_refresh_cb(client: Client, cq: CallbackQuery):
-    parts  = cq.data.split(":")
-    uid    = int(parts[1])
-    rec_id = int(parts[2])
-    if cq.from_user.id != uid:
-        return await cq.answer("Not your recording.", show_alert=True)
-    entry = active_recs.get(uid, {}).get(rec_id)
-    if not entry:
-        return await cq.answer("Recording finished or not found.", show_alert=True)
-    recording_start = entry["start"]
-    duration        = time_to_seconds(entry["status"]["target"])
-    elapsed         = time.time() - recording_start
-    pct             = min((elapsed / duration) * 100, 100) if duration > 0 else 0
-    bar             = "●" * int(10 * pct // 100) + "⬜" * (10 - int(10 * pct // 100))
-    task_id         = hex(rec_id)[2:10]
-    slot_n          = list(active_recs.get(uid, {}).keys()).index(rec_id) + 1
-    text = (
-        f"🎬 **Recording #{slot_n} in Progress...**\n\n"
-        f"📡 Stream Capture\n"
-        f"[{bar}]  {pct:.1f}%\n"
-        f"⏱ Time  : {TimeFormatter(int(elapsed*1000))} / {TimeFormatter(duration*1000)}\n"
-        f"🆔 Task  : {task_id}\n\n"
-        f"_Press **Gen Preview** for a live thumbnail_"
-    )
-    kb = _rec_progress_kb(uid, rec_id)
-    try:
-        if entry.get("is_photo_msg"):
-            await cq.message.edit_caption(text, reply_markup=kb)
-        else:
-            await cq.message.edit_text(text, reply_markup=kb)
-        await cq.answer("✅ Refreshed!")
-    except Exception:
-        await cq.answer("Already up to date.", show_alert=False)
-
-
-@app.on_callback_query(filters.regex(r"^rec_cxl:(\d+):(\d+)$"))
-async def rec_cancel_btn_cb(client: Client, cq: CallbackQuery):
-    parts  = cq.data.split(":")
-    uid    = int(parts[1])
-    rec_id = int(parts[2])
-    if cq.from_user.id != uid:
-        return await cq.answer("Not your recording.", show_alert=True)
-    if uid not in active_recs or rec_id not in active_recs.get(uid, {}):
-        return await cq.answer("Recording already finished.", show_alert=True)
-    cancelled_recs.add((uid, rec_id))
-    pid = active_recs[uid][rec_id].get("ffmpeg_pid")
-    if pid:
-        try:
-            import signal
-            os.kill(pid, signal.SIGTERM)
-        except Exception:
-            pass
-    await cq.answer("⏹ Cancel signal sent.")
-    try:
-        await cq.message.edit_caption("⏹ **Recording cancelled.**\nPartial file will be uploaded if available.")
-    except Exception:
-        try:
-            await cq.message.edit_text("⏹ **Recording cancelled.**\nPartial file will be uploaded if available.")
-        except Exception:
-            pass
-
-
-# ---------------------------------------------------------------------------
-# Upload destination choice  (upl:{uid}:{rec_id}:tg|gd|both)
-# ---------------------------------------------------------------------------
-
-@app.on_callback_query(filters.regex(r"^upl:(\d+):(\d+):(tg|gd|both)$"))
-async def upload_choice_cb(client: Client, cq: CallbackQuery):
-    parts  = cq.data.split(":")
-    uid    = int(parts[1])
-    rec_id = int(parts[2])
-    choice = parts[3]
-
-    if cq.from_user.id != uid:
-        return await cq.answer("Not your recording.", show_alert=True)
-
-    state = pending_uploads.pop((uid, rec_id), None)
-    if not state:
-        await cq.answer("Session expired — file may have been cleaned up.", show_alert=True)
-        try:
-            await cq.message.edit_text("⚠️ Upload session expired.")
-        except Exception:
-            pass
-        return
-
-    # If Drive selected but not connected → restore state and show alert
-    if choice in ("gd", "both"):
-        gd_ok = _gdrive_is_enabled() or is_user_connected(uid)
-        if not gd_ok:
-            pending_uploads[(uid, rec_id)] = state   # restore so user can retry
-            return await cq.answer(
-                "☁️ Google Drive linked nahi hai!\n/DriveAuth se pehle connect karein.",
-                show_alert=True,
-            )
-
-    await cq.answer("⬆️ Uploading…")
-    try:
-        await cq.message.edit_text("⬆️ Uploading… please wait.", reply_markup=None)
-    except Exception:
-        pass
-
-    video_path    = state["video_path"]
-    thumb_path    = state["thumb_path"]
-    caption       = state["caption"]
-    dur           = state["dur"]
-    save_dir      = state["save_dir"]
-    was_cancelled = state["was_cancelled"]
-    setup         = state["setup"]
-    send_target   = state["send_target"]
-    status_msg    = state["status_msg"]
-    filename      = state["filename"]
-
-    if choice in ("tg", "both"):
-        upload_start = time.time()
-        await split_and_send_video(
-            send_target, video_path, caption, dur,
-            thumb_path=thumb_path,
-            status_msg=status_msg,
-            progress=progress_for_pyrogram,
-            progress_args=(send_target, upload_start, status_msg, save_dir, was_cancelled),
-            _uid=uid, _chat_id=send_target.chat.id,
-        )
-        if setup.get("auto_mode") and not was_cancelled and dur > 120:
-            try:
-                await status_msg.edit_text("✂️ Auto mode: generating last 2-minute clip…")
-            except Exception:
-                pass
-            clip_dir   = join(save_dir, "auto_clips")
-            os.makedirs(clip_dir, exist_ok=True)
-            last_clip  = join(clip_dir, "last_2min.mkv")
-            last_start = max(0, dur - 120)
-            await runcmd(
-                f'ffmpeg -hide_banner -loglevel error -nostats -y '
-                f'-ss {last_start} -to {dur} -i {shlex.quote(video_path)} '
-                f'-c copy {shlex.quote(last_clip)}'
-            )
-            if os.path.exists(last_clip) and os.path.getsize(last_clip) > 0:
-                try:
-                    await send_target.reply_video(
-                        video=last_clip,
-                        caption=(f"🎬 **{BRAND_TITLE}** — ⏭ Last 2 minute"),
-                        supports_streaming=True,
-                    )
-                except Exception as ce:
-                    LOG.warning(f"Auto clip upload failed: {ce}")
-
-    if choice in ("gd", "both"):
-        await upload_and_notify(client, uid, video_path, filename)
-
-    if save_dir and os.path.exists(save_dir):
-        schedule_retention_cleanup(save_dir)
-
-
-# ---------------------------------------------------------------------------
-# /limit — show daily quota status
-# ---------------------------------------------------------------------------
-
-@app.on_message(filters.command(["limit", "Limit"]) & AUTH)
-async def limit_cmd(_, message: Message):
-    uid = message.from_user.id
-    if is_owner(uid):
-        return await message.reply_text(
-            "👑 **Owner Account — Unlimited Access**\n\n"
-            "You have unrestricted recording access.\n"
-            "Use /rec anytime without quota limits."
-        )
-    await message.reply_text(
-        format_limit_message(uid),
-        disable_web_page_preview=True,
-    )
-
-
-@app.on_callback_query(filters.regex(r"^approve:(\d+):(\d+)$"))
-async def cb_approve(client: Client, cq: CallbackQuery):
-    if not is_owner(cq.from_user.id):
-        return await cq.answer("Not authorized.", show_alert=True)
-    uid  = int(cq.data.split(":")[1])
-    days = int(cq.data.split(":")[2])
-    data = load_verified()
-    data["pending"].pop(str(uid), None)
-    entry: dict = {"approved_by": cq.from_user.id, "approved_at": datetime.now(tz).isoformat()}
-    if days > 0:
-        exp = datetime.now(tz) + timedelta(days=days)
-        entry["expires_at"] = exp.isoformat()
-        label = f"{days} days"
-    else:
-        label = "permanent"
-    data.setdefault("verified", {})[str(uid)] = entry
-    save_verified(data)
-    await cq.answer(f"Approved ({label})!")
-    try:
-        await cq.message.edit_text(
-            cq.message.text + f"\n\n✅ Approved ({label}) by {cq.from_user.first_name}",
-            reply_markup=None,
-        )
-    except Exception:
-        pass
-    try:
-        await client.send_message(
-            uid,
-            f"✅ **You are now verified!**\n\nAccess: `{label}`\n\n"
-            f"You can now use `/rec`, `/download`, and other commands.",
-        )
-    except Exception as e:
-        LOG.warning(f"Could not notify user {uid}: {e}")
-
-
-@app.on_callback_query(filters.regex(r"^reject:(\d+)$"))
-async def cb_reject(client: Client, cq: CallbackQuery):
-    if not is_owner(cq.from_user.id):
-        return await cq.answer("Not authorized.", show_alert=True)
-    uid  = int(cq.data.split(":")[1])
-    data = load_verified()
-    data["pending"].pop(str(uid), None)
-    save_verified(data)
-    await cq.answer("Rejected.")
-    try:
-        await cq.message.edit_text(
-            cq.message.text + f"\n\n❌ Rejected by {cq.from_user.first_name}", reply_markup=None
-        )
-    except Exception:
-        pass
-    try:
-        await client.send_message(
-            uid,
-            "❌ **Your verification request was not approved.**\n\n"
-            f"Contact @{SUPPORT_USERNAME} for more info.",
-        )
-    except Exception as e:
-        LOG.warning(f"Could not notify user {uid}: {e}")
-
-
-# ---------------------------------------------------------------------------
-# /UpdateWatermark — owner-only: change default watermark image URL (or fallback text)
-# ---------------------------------------------------------------------------
-
-@app.on_message(filters.command(["UpdateWatermark", "updatewatermark", "setwatermark", "wmark"]) & AUTH)
-async def update_watermark_cmd(_, message: Message):
-    if not is_owner(message.from_user.id):
-        return
-    parts = message.text.split(None, 1)
-    if len(parts) < 2 or not parts[1].strip():
-        current_url  = get_default_watermark_img_url()
-        current_text = get_default_watermark()
-        return await message.reply_text(
-            f"**Watermark Settings**\n\n"
-            f"🖼 Image URL: `{current_url}`\n"
-            f"📝 Fallback text: `{current_text}`\n\n"
-            f"**To set image watermark (recommended):**\n"
-            f"`/UpdateWatermark https://example.com/logo.png`\n\n"
-            f"**To set text watermark (fallback):**\n"
-            f"`/UpdateWatermark @YourChannelName`\n\n"
-            f"Image watermark takes priority. Text is used only when image can't be downloaded."
-        )
-
-    new_val = parts[1].strip()
-
-    if new_val.lower().startswith("http"):
-        # Image URL
-        set_default_watermark_img_url(new_val)
-        await message.reply_text("⬇️ Downloading new watermark image…")
-        ok = await _async_ensure_watermark_img()
-        if ok:
-            await message.reply_text(
-                f"✅ **Watermark image updated!**\n\n"
-                f"URL: `{new_val}`\n\n"
-                f"All `/rec`, `/drec`, and `/Watermark` will now use this image (bottom-right, last 2 min)."
-            )
-        else:
-            await message.reply_text(
-                f"⚠️ URL saved, but image download failed. Check the URL.\n`{new_val}`"
-            )
-    else:
-        # Text fallback
-        set_default_watermark(new_val)
-        await message.reply_text(
-            f"✅ **Fallback watermark text updated!**\n\n"
-            f"Text: `{new_val}`\n\n"
-            f"This is used only when the watermark image can't be fetched."
-        )
-
-
-# ---------------------------------------------------------------------------
-# /setwatermarksize — owner-only: change watermark logo size (px width)
-# ---------------------------------------------------------------------------
-
-@app.on_message(filters.command(["setwatermarksize", "SetWatermarkSize", "wmarksize"]) & AUTH)
-async def setwatermarksize_cmd(_, message: Message):
-    if not is_owner(message.from_user.id):
-        return
-    current = get_watermark_size()
-    parts   = message.text.split(None, 1)
-    if len(parts) < 2 or not parts[1].strip():
-        return await message.reply_text(
-            f"**Watermark Size Settings**\n\n"
-            f"📐 Current size: `{current}px` width\n\n"
-            f"**Usage:**\n"
-            f"`/setwatermarksize <pixels>`\n\n"
-            f"**Examples:**\n"
-            f"• `/setwatermarksize 60` — chota (small)\n"
-            f"• `/setwatermarksize 80` — medium (default)\n"
-            f"• `/setwatermarksize 120` — thoda bada\n"
-            f"• `/setwatermarksize 150` — bada (large)\n\n"
-            f"_Range: 20px – 500px. Yeh size photo aur M3U8 recording dono par apply hogi._"
-        )
-    val = parts[1].strip()
-    if not val.isdigit():
-        return await message.reply_text("❌ Sirf number dena hai. Example: `/setwatermarksize 100`")
-    px = int(val)
-    if px < 20 or px > 500:
-        return await message.reply_text("❌ Size 20 se 500 ke beech honi chahiye.")
-    set_watermark_size(px)
-    await message.reply_text(
-        f"✅ **Watermark size updated!**\n\n"
-        f"📐 New size: `{px}px` width\n\n"
-        f"Yeh size ab se `/rec`, `/drec`, aur `/Watermark` sab mein apply hogi.\n"
-        f"Photo watermark aur M3U8 live recording dono mein."
-    )
-
-
-# ---------------------------------------------------------------------------
-# /audionameupdate — owner-only: change the audio track brand name live
-# ---------------------------------------------------------------------------
-
-@app.on_message(filters.command(["audionameupdate", "audionamechange", "audiobrand"]) & AUTH)
-async def audionameupdate_cmd(_, message: Message):
-    if not is_owner(message.from_user.id):
-        return
-    parts = message.text.split(None, 1)
-    if len(parts) < 2 or not parts[1].strip():
-        current = get_audio_brand_name()
-        return await message.reply_text(
-            f"**Audio Brand Name**\n\n"
-            f"Current: `{current}`\n\n"
-            f"Usage: `/audionameupdate @YourChannelName`\n"
-            f"Takes effect on the **next** recording."
-        )
-    new_name = parts[1].strip()
-    set_audio_brand_name(new_name)
-    await message.reply_text(
-        f"✅ **Audio brand name updated!**\n\n"
-        f"New name: `{new_name}`\n\n"
-        f"This will be embedded in the **title** and **handler_name** of all audio tracks "
-        f"in every recording from now on. Visible in VLC, MX Player, and Telegram's audio track selector."
-    )
-
-
-# ---------------------------------------------------------------------------
-# /Admin_add, /Admin_delete, /Admin_list — owner-only, hidden
-# ---------------------------------------------------------------------------
-
-@app.on_message(filters.command("Admin_add"))
-async def admin_add_cmd(_, message: Message):
-    uid = message.from_user.id if message.from_user else None
-    if not uid or not is_owner(uid):
-        return await message.reply_text("❌ This command is for the bot owner only.")
-    parts = message.command
-    if len(parts) < 2:
-        return await message.reply_text(
-            "ℹ️ **Usage:** `/Admin_add <user_id>`\n\n"
-            "Example: `/Admin_add 123456789`\n"
-            "To find a user ID, forward their message to @userinfobot"
-        )
-    try:
-        uid = int(parts[1])
-    except ValueError:
-        return await message.reply_text("❌ Invalid user ID.")
-    if is_owner(uid):
-        return await message.reply_text("That user is already an owner.")
-    ok = add_admin(uid)
-    invalidate_member_cache(uid)
-    if ok:
-        await message.reply_text(f"✅ {uid} added as admin.")
-    else:
-        await message.reply_text(f"⚠️ {uid} is already an admin.")
-
-
-@app.on_message(filters.command("Admin_delete"))
-async def admin_delete_cmd(_, message: Message):
-    if not is_owner(message.from_user.id):
-        return await message.reply_text("❌ This command is for the bot owner only.")
-    parts = message.command
-    if len(parts) < 2:
-        return await message.reply_text(
-            "ℹ️ **Usage:** `/Admin_delete <user_id>`\n\n"
-            "Example: `/Admin_delete 123456789`"
-        )
-    try:
-        uid = int(parts[1])
-    except ValueError:
-        return await message.reply_text("❌ Invalid user ID.")
-    ok = del_admin(uid)
-    invalidate_member_cache(uid)
-    if ok:
-        await message.reply_text(f"✅ `{uid}` removed from admins.")
-    else:
-        await message.reply_text(f"⚠️ `{uid}` was not an admin.")
-
-
-@app.on_message(filters.command("Admin_list"))
-async def admin_list_cmd(_, message: Message):
-    if not is_owner(message.from_user.id):
-        return await message.reply_text("❌ This command is for the bot owner only.")
-    admins = load_admins()
-    if not admins:
-        return await message.reply_text("No admins configured.")
-    lines = "\n".join(f"• `{uid}`" for uid in admins)
-    await message.reply_text(f"**Admin list ({len(admins)}):**\n{lines}")
-
-
-# ---------------------------------------------------------------------------
-# /ffmpeg  /ffprobe — owner/admin shell commands
-# ---------------------------------------------------------------------------
-
-# ---------------------------------------------------------------------------
-# FFmpeg Task-mode helpers
-# ---------------------------------------------------------------------------
-
-_FF_DUR_RE  = re.compile(r"(?:^|\s)-t\s+([^\s-]\S*)", re.IGNORECASE)
-_FF_TIME_RE = re.compile(r"time=(\d+:\d+:\d+\.\d+)")
-_FF_SIZE_RE = re.compile(r"size=\s*(\d+)kB")
-_FF_OUT_EXTS = {".mkv", ".mp4", ".ts", ".avi", ".mov", ".flv", ".webm", ".m4v",
-                ".aac", ".mp3", ".m4a", ".opus", ".ogg"}
-
-
-def _ff_hms_to_sec(s: str) -> float:
-    try:
-        parts = s.split(":")
-        if len(parts) == 3:
-            return int(parts[0]) * 3600 + int(parts[1]) * 60 + float(parts[2])
-        if len(parts) == 2:
-            return int(parts[0]) * 60 + float(parts[1])
-        return float(parts[0])
-    except Exception:
-        return 0.0
-
-
-def _ff_sec_to_hms(sec: float) -> str:
-    sec = max(0, int(sec))
-    h, rem = divmod(sec, 3600)
-    m, s = divmod(rem, 60)
+        return int(str(value).strip())
+    except (TypeError, ValueError):
+        return default
+
+
+def _progress_bar(pct: int, width: int = 10) -> str:
+    pct = max(0, min(100, int(pct)))
+    filled = int(width * pct / 100)
+    return "■" * filled + "□" * (width - filled)
+
+def _fmt_time(seconds: float) -> str:
+    h = int(seconds // 3600)
+    m = int((seconds % 3600) // 60)
+    s = int(seconds % 60)
     return f"{h:02d}:{m:02d}:{s:02d}"
 
+def _build_progress_msg(filename: str, pct: int, elapsed: float,
+                        speed_mbps: float, channel: dict,
+                        user, cancel_id: str, total_duration: float = 0,
+                        status: str = "Downloading") -> str:
+    bar = _progress_bar(pct)
+    username = f"@{user.username}" if user.username else user.first_name
+    platform = channel.get("channelCategoryId", "Unknown")
+    total_duration = max(0, float(total_duration))
+    recorded = min(max(0, float(elapsed)), total_duration) if total_duration else max(0, float(elapsed))
+    remaining = max(0, total_duration - recorded) if total_duration else 0
+    time_line = (
+        f"*Recorded:* `{_fmt_time(recorded)} / {_fmt_time(total_duration)}`\n"
+        f"*Remaining:* `{_fmt_time(remaining)}`\n"
+        if total_duration else
+        f"*Elapsed:* `{_fmt_time(recorded)}`\n"
+    )
+    return (
+        f"📄 *File:*\n`{filename}`\n\n"
+        f"*Progress:*\n"
+        f"`[{bar}] {pct}%`\n\n"
+        f"*Status:* {status}\n"
+        f"{time_line}"
+        f"*Speed:* `{speed_mbps:.2f} MB/s`\n\n"
+        f"*Platform:* {platform}\n"
+        f"*User:* {username}\n"
+        f"*User ID:* `{user.id}`\n\n"
+        f"❌ *Cancel Command:*\n`/cancel {cancel_id}`"
+    )
 
-def _ff_bar(pct: float, length: int = 10) -> str:
-    filled = int(length * min(pct, 100.0) / 100)
-    return "█" * filled + "░" * (length - filled)
+
+# ── New progress system helpers ───────────────────────────────────────────────
+
+def _build_rec_status_text(filename: str, pct: float, speed_mbps: float | None,
+                            status: str = "Recording...") -> str:
+    """Build the single editable live-progress message."""
+    bar = _progress_bar(int(pct))
+    speed_text = "Calculating..." if not speed_mbps else f"{speed_mbps:.2f} MB/s"
+    return (
+        f"🎥 Your file is Recording...\n\n"
+        f"📄 File:\n`{filename}`\n\n"
+        f"Progress:\n"
+        f"`[{bar}] {pct:.2f}%`\n\n"
+        f"⚡ Speed: `{speed_text}`\n\n"
+        f"Status: {status}"
+    )
 
 
-def _parse_ff_duration(args_text: str) -> float:
-    m = _FF_DUR_RE.search(args_text)
-    return _ff_hms_to_sec(m.group(1)) if m else 0.0
+def _build_media_status_text(filename: str, pct: float, speed_mbps: float | None,
+                             status: str = "Processing...") -> str:
+    """Build a plain-text status message for local video operations."""
+    bar = _progress_bar(int(pct))
+    speed_text = "Calculating..." if not speed_mbps else f"{speed_mbps:.2f} MB/s"
+    return (
+        "🎬 Processing Video...\n\n"
+        f"📄 File:\n{filename}\n\n"
+        f"Progress:\n[{bar}] {pct:.2f}%\n\n"
+        f"⚡ Speed:\n{speed_text}\n\n"
+        f"Status:\n{status}"
+    )
 
 
-def _detect_ff_output(args_text: str) -> str | None:
-    """Return last non-URL argument that looks like an output file, or None."""
-    try:
-        parts = shlex.split(args_text)
-    except Exception:
-        return None
-    _skip_flags = {
-        "-i", "-t", "-ss", "-to", "-vf", "-af", "-c", "-c:v", "-c:a",
-        "-b:v", "-b:a", "-r", "-s", "-f", "-vcodec", "-acodec", "-preset",
-        "-crf", "-maxrate", "-bufsize", "-threads", "-movflags", "-metadata",
-        "-user_agent", "-headers", "-referer", "-origin", "-timeout",
-        "-map", "-filter_complex", "-g", "-keyint_min", "-sc_threshold",
-        "-loglevel", "-hide_banner", "-stats", "-nostats",
+def _stream_label(stream: dict, ordinal: int) -> str:
+    tags = stream.get("tags") or {}
+    language = str(tags.get("language") or "").strip()
+    title = str(tags.get("title") or tags.get("handler_name") or "").strip()
+    language_names = {
+        "eng": "English", "en": "English", "hin": "Hindi", "hi": "Hindi",
+        "tam": "Tamil", "ta": "Tamil", "tel": "Telugu", "te": "Telugu",
+        "kan": "Kannada", "kn": "Kannada", "mar": "Marathi", "mr": "Marathi",
+        "mal": "Malayalam", "ml": "Malayalam", "ben": "Bengali", "bn": "Bengali",
     }
-    skip_next = False
-    last_file = None
-    for p in parts:
-        if skip_next:
-            skip_next = False
-            continue
-        if p in _skip_flags:
-            skip_next = True
-            continue
-        if p.startswith("-"):
-            continue
-        if p.startswith(("http://", "https://", "rtmp://", "rtsp://", "rtp://", "udp://")):
-            continue
-        ext = os.path.splitext(p)[1].lower()
-        if ext in _FF_OUT_EXTS:
-            last_file = p
-    return last_file
+    language = language_names.get(language.lower(), language)
+    if language and title and title.lower() not in language.lower():
+        return f"{language} ({title})"
+    return language or title or f"Stream {ordinal + 1}"
 
 
-def _ffmpeg_running_kb(task_id: str) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("🎬 Gen Preview",      callback_data=f"ffpg:{task_id}:preview"),
-            InlineKeyboardButton("🔄 Refresh Progress", callback_data=f"ffpg:{task_id}:refresh"),
-        ],
-        [InlineKeyboardButton("❌ Cancel",              callback_data=f"ffpg:{task_id}:cancel")],
-    ])
-
-
-def _ffmpeg_upload_kb(task_id: str) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("📤 Telegram",          callback_data=f"ffup:{task_id}:tg"),
-            InlineKeyboardButton("☁️ Google Drive",      callback_data=f"ffup:{task_id}:gd"),
-        ],
-        [InlineKeyboardButton("📤➕☁️ Upload to Both",   callback_data=f"ffup:{task_id}:both")],
-        [InlineKeyboardButton("🔲 16:9 Crop (1280×720)", callback_data=f"ffup:{task_id}:169")],
-        [InlineKeyboardButton("🗑️ Delete",               callback_data=f"ffup:{task_id}:del")],
-    ])
-
-
-async def _run_ffmpeg_task(client: Client, args_text: str, task_id: str) -> None:
-    """Background coroutine: run ffmpeg, stream progress, handle result."""
-    job        = ffmpeg_jobs[task_id]
-    status_msg = job["status_msg"]
-    duration   = job["duration"]
-    out_file   = job.get("output_file")
-
-    cur_time_sec = 0.0
-    cur_size_kb  = 0
-
+async def _stream_probe_file(path: str) -> dict:
+    proc = await asyncio.create_subprocess_exec(
+        "ffprobe", "-v", "error", "-show_streams", "-show_format",
+        "-of", "json", path,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=60)
+    if proc.returncode != 0:
+        raise RuntimeError(stderr.decode(errors="replace")[-1000:] or "ffprobe failed")
     try:
-        proc = await asyncio.create_subprocess_shell(
-            f"ffmpeg -y {args_text}",
-            stdout=asyncio.subprocess.DEVNULL,
+        data = json.loads(stdout.decode(errors="replace"))
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("ffprobe returned invalid metadata.") from exc
+    streams = data.get("streams") or []
+    format_duration = (data.get("format") or {}).get("duration")
+    try:
+        duration = max(0.0, float(format_duration or 0.0))
+    except (TypeError, ValueError):
+        duration = 0.0
+    return {"streams": streams, "duration": duration}
+
+
+_FFMPEG_METADATA_OWNER = "@LittleSinghamChannel"
+_FFMPEG_LANGUAGE_NAMES = {
+    "hi": "Hindi",
+    "hin": "Hindi",
+    "en": "English",
+    "eng": "English",
+    "ta": "Tamil",
+    "tam": "Tamil",
+    "te": "Telugu",
+    "tel": "Telugu",
+    "kn": "Kannada",
+    "kan": "Kannada",
+    "ml": "Malayalam",
+    "mal": "Malayalam",
+    "mr": "Marathi",
+    "mar": "Marathi",
+    "gu": "Gujarati",
+    "guj": "Gujarati",
+    "pa": "Punjabi",
+    "pan": "Punjabi",
+    "bn": "Bengali",
+    "ben": "Bengali",
+    "or": "Odia",
+    "ori": "Odia",
+    "od": "Odia",
+    "ur": "Urdu",
+    "urd": "Urdu",
+}
+_FFMPEG_LANGUAGE_CODES = {
+    "hindi": "hin",
+    "english": "eng",
+    "tamil": "tam",
+    "telugu": "tel",
+    "kannada": "kan",
+    "malayalam": "mal",
+    "marathi": "mar",
+    "gujarati": "guj",
+    "punjabi": "pan",
+    "bengali": "ben",
+    "odia": "ori",
+    "urdu": "urd",
+}
+_FFMPEG_LANGUAGE_ISO3 = {
+    "hi": "hin", "hin": "hin",
+    "en": "eng", "eng": "eng",
+    "ta": "tam", "tam": "tam",
+    "te": "tel", "tel": "tel",
+    "kn": "kan", "kan": "kan",
+    "ml": "mal", "mal": "mal",
+    "mr": "mar", "mar": "mar",
+    "gu": "guj", "guj": "guj",
+    "pa": "pan", "pan": "pan",
+    "bn": "ben", "ben": "ben",
+    "or": "ori", "ori": "ori", "od": "ori",
+    "ur": "urd", "urd": "urd",
+}
+
+
+def _ffmpeg_language(language: object, title: object = "") -> tuple[str, str]:
+    """Return an ISO code and readable name for a stream language tag."""
+    raw = str(language or "").strip().lower()
+    title_text = str(title or "").strip()
+    code = _FFMPEG_LANGUAGE_ISO3.get(
+        raw,
+        _FFMPEG_LANGUAGE_CODES.get(raw, raw),
+    )
+    if code in _FFMPEG_LANGUAGE_NAMES:
+        return code, _FFMPEG_LANGUAGE_NAMES[code]
+    title_key = title_text.lower()
+    for name, iso_code in _FFMPEG_LANGUAGE_CODES.items():
+        if name in title_key:
+            return iso_code, name.title()
+    if not raw:
+        return "und", "Und"
+    return (raw if len(raw) == 3 else "und"), title_text or raw.upper()
+
+
+async def build_ffmpeg_metadata(
+    input_file: str,
+    *,
+    probe_args: list[str] | None = None,
+    selected_streams: dict[str, list[int] | None] | None = None,
+    stream_offsets: dict[str, int] | None = None,
+    include_format_metadata: bool = True,
+) -> list[str]:
+    """Build dynamic FFmpeg metadata arguments from ffprobe JSON.
+
+    ``selected_streams`` contains per-type ffprobe ordinal indexes that will
+    actually be mapped to the output. When omitted, every detected stream is
+    described. ``stream_offsets`` rebases output stream ordinals when metadata
+    is assembled from more than one input.
+    """
+    cmd = [
+        "ffprobe", "-v", "error", "-show_streams", "-show_format",
+        "-of", "json",
+        *(probe_args or []),
+        input_file,
+    ]
+    streams: list[dict] = []
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        job["proc"] = proc
-        job["pid"]  = proc.pid
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=60)
+        if proc.returncode != 0:
+            raise RuntimeError(stderr.decode(errors="replace")[-700:] or "ffprobe failed")
+        streams = (json.loads(stdout.decode(errors="replace")).get("streams") or [])
+    except (asyncio.TimeoutError, OSError, json.JSONDecodeError, RuntimeError) as exc:
+        logger.warning("Unable to probe %s for metadata: %s", input_file, exc)
 
-        loop_time   = asyncio.get_event_loop().time
-        last_edit   = loop_time() - 12      # trigger first edit quickly
-        UPDATE_SECS = 8
-
-        stderr_tail: list[str] = []
-
-        while True:
-            try:
-                raw = await asyncio.wait_for(proc.stderr.readline(), timeout=60)
-            except asyncio.TimeoutError:
-                break
-            if not raw:
-                break
-            line = raw.decode("utf-8", errors="replace")
-            stderr_tail.append(line)
-            if len(stderr_tail) > 100:
-                stderr_tail.pop(0)
-
-            tm = _FF_TIME_RE.search(line)
-            sz = _FF_SIZE_RE.search(line)
-            if tm:
-                cur_time_sec = _ff_hms_to_sec(tm.group(1))
-                job["cur_time_sec"] = cur_time_sec
-            if sz:
-                cur_size_kb = int(sz.group(1))
-                job["cur_size_kb"] = cur_size_kb
-
-            if job.get("cancelled"):
-                try:
-                    proc.kill()
-                except Exception:
-                    pass
-                break
-
-            now = loop_time()
-            if now - last_edit >= UPDATE_SECS:
-                pct      = min(100.0, cur_time_sec / duration * 100) if duration > 0 else 0.0
-                bar      = _ff_bar(pct)
-                size_str = f"{cur_size_kb / 1024:.1f} MB" if cur_size_kb else "—"
-                tot_str  = _ff_sec_to_hms(duration) if duration else "—"
-                text = (
-                    f"🎬 **FFmpeg Task Running...**\n\n"
-                    f"📡 **Stream Capture**\n"
-                    f"[{bar}] {pct:.0f}%\n\n"
-                    f"⏱️ Time : `{_ff_sec_to_hms(cur_time_sec)}` / `{tot_str}`\n"
-                    f"📦 Size : `{size_str}`\n"
-                    f"🆔 Task : `{task_id}`"
-                )
-                try:
-                    await status_msg.edit_text(text, reply_markup=_ffmpeg_running_kb(task_id))
-                except Exception:
-                    pass
-                last_edit = now
-
-        await proc.wait()
-        rc = proc.returncode or 0
-        job["done"]        = True
-        job["rc"]          = rc
-        job["stderr_tail"] = "".join(stderr_tail)
-
-        if job.get("cancelled"):
-            try:
-                await status_msg.edit_text(f"❌ Task `{task_id}` was cancelled.", reply_markup=None)
-            except Exception:
-                pass
-            return
-
-        # ── Output file produced ───────────────────────────────────────────
-        if rc == 0 and out_file and os.path.exists(out_file) and os.path.getsize(out_file) > 0:
-            size_mb  = os.path.getsize(out_file) / (1024 * 1024)
-            dur_str  = _ff_sec_to_hms(cur_time_sec or duration)
-            fname    = os.path.basename(out_file)
-            text = (
-                f"🎉 **FFmpeg Task Completed!**\n\n"
-                f"📁 **File Name:** `{fname}`\n"
-                f"📦 **Size:** `{size_mb:.1f} MB`\n"
-                f"⏱️ **Duration:** `{dur_str}`\n\n"
-                f"Choose upload option:"
+    offsets = {"video": 0, "audio": 0, "subtitle": 0}
+    offsets.update(stream_offsets or {})
+    selected = selected_streams or {}
+    output_args = []
+    if include_format_metadata:
+        output_args += [
+            "-metadata", f"title={_FFMPEG_METADATA_OWNER}",
+            "-metadata", f"artist={_FFMPEG_METADATA_OWNER}",
+            "-metadata", f"comment={_FFMPEG_METADATA_OWNER}",
+            "-metadata", f"encoder={_FFMPEG_METADATA_OWNER}",
+        ]
+    type_ordinals = {"video": 0, "audio": 0, "subtitle": 0}
+    selected_positions = {
+        stream_type: {
+            source_index: output_index
+            for output_index, source_index in enumerate(source_indexes)
+        }
+        for stream_type, source_indexes in selected.items()
+        if source_indexes is not None
+    }
+    output_ordinals = {"video": 0, "audio": 0, "subtitle": 0}
+    for stream in streams:
+        stream_type = str(stream.get("codec_type") or "")
+        if stream_type not in type_ordinals:
+            continue
+        source_ordinal = type_ordinals[stream_type]
+        type_ordinals[stream_type] += 1
+        if selected_streams is not None and stream_type not in selected:
+            continue
+        requested = selected.get(stream_type)
+        if (
+            stream_type in selected
+            and requested is not None
+            and source_ordinal not in requested
+        ):
+            continue
+        output_ordinal = offsets[stream_type] + (
+            selected_positions[stream_type][source_ordinal]
+            if requested is not None
+            else output_ordinals[stream_type]
+        )
+        output_ordinals[stream_type] += 1
+        if stream_type == "video":
+            for key in ("title", "artist", "comment", "encoder"):
+                output_args += [
+                    f"-metadata:s:v:{output_ordinal}",
+                    f"{key}={_FFMPEG_METADATA_OWNER}",
+                ]
+        elif stream_type == "audio":
+            tags = stream.get("tags") or {}
+            language_code, language_name = _ffmpeg_language(
+                tags.get("language"),
+                tags.get("title") or tags.get("handler_name"),
             )
-            try:
-                await status_msg.edit_text(text, reply_markup=_ffmpeg_upload_kb(task_id))
-            except Exception:
-                pass
-
-        # ── No file / error → show text output ────────────────────────────
+            audio_label = _audio_label_for_language(language_name)
+            title = f"@{audio_label} {language_name}"
+            output_args += [
+                f"-metadata:s:a:{output_ordinal}", f"title={title}",
+                f"-metadata:s:a:{output_ordinal}", f"handler_name={title}",
+                f"-metadata:s:a:{output_ordinal}", f"language={language_code}",
+            ]
         else:
-            output = job["stderr_tail"].strip() or "(no output)"
-            if len(output) > 3500:
-                output = "…(trimmed)\n" + output[-3500:]
-            icon = "✅ Done" if rc == 0 else f"❌ Exit code: {rc}"
-            try:
-                await status_msg.edit_text(
-                    f"{icon}\n\n```\n{output}\n```",
-                    parse_mode=None,
-                    reply_markup=None,
-                )
-            except Exception:
-                pass
+            subtitle_title = f"{_FFMPEG_METADATA_OWNER} Subtitle"
+            output_args += [
+                f"-metadata:s:s:{output_ordinal}", f"title={subtitle_title}",
+                f"-metadata:s:s:{output_ordinal}",
+                f"handler_name={subtitle_title}",
+            ]
+    return output_args
 
+
+def _stream_output_name(source_name: str, stream: dict, ordinal: int) -> str:
+    kind = stream.get("codec_type") or "stream"
+    codec = str(stream.get("codec_name") or "").lower()
+    label = _media_safe_name(_stream_label(stream, ordinal), f"{kind}_{ordinal + 1}")
+    label = re.sub(r"\s+", "_", label)
+    if kind == "audio":
+        extensions = {
+            "mp3": ".mp3", "aac": ".aac", "opus": ".opus", "vorbis": ".ogg",
+            "flac": ".flac", "ac3": ".ac3", "eac3": ".eac3", "wav": ".wav",
+        }
+        extension = extensions.get(codec, ".mka")
+    elif kind == "subtitle":
+        extension = {
+            "ass": ".ass", "ssa": ".ssa", "subrip": ".srt", "srt": ".srt",
+            "webvtt": ".vtt", "mov_text": ".srt",
+        }.get(codec, ".mks")
+    elif kind == "video":
+        extension = ".mkv"
+    else:
+        extension = ".bin"
+    stem = Path(source_name).stem or "extracted"
+    return _media_safe_name(f"{stem}_{kind}_{ordinal + 1}_{label}{extension}")
+
+
+def _build_stream_status_text(filename: str, pct: float, speed_mbps: float | None,
+                              status: str, elapsed: float = 0.0,
+                              remaining: float = 0.0) -> str:
+    speed_text = "Calculating..." if not speed_mbps else f"{speed_mbps:.2f} MB/s"
+    return (
+        "🎬 Extracting Stream\n\n"
+        f"📄 File:\n{filename}\n\n"
+        f"Progress:\n[{_progress_bar(int(pct))}] {pct:.2f}%\n\n"
+        f"⚡ Speed:\n{speed_text}\n\n"
+        f"Status:\n{status}\n\n"
+        f"Elapsed: {_fmt_time(elapsed)}\n"
+        f"Remaining: {_fmt_time(remaining)}"
+    )
+
+
+def _build_stream_popup_text(task_id: str) -> str:
+    info = RECORDING_PROGRESS_INFO.get(task_id)
+    if not info:
+        return "⚠️ Extraction info not available."
+    user = info.get("user_obj")
+    username = (
+        f"@{user.username}" if user and user.username
+        else (user.first_name if user else "Unknown")
+    )
+    filename = str(info.get("filename") or "Unknown")
+    pct = float(info.get("pct") or 0.0)
+    elapsed = float(info.get("elapsed") or 0.0)
+    total = float(info.get("total_duration") or 0.0)
+    remaining = max(0.0, total - elapsed) if total else 0.0
+    speed = float(info.get("speed_mbps") or 0.0)
+    speed_text = "Calculating..." if not speed else f"{speed:.2f} MB/s"
+    current = int(info.get("current_item") or 0)
+    count = int(info.get("item_count") or 1)
+    status = str(info.get("status") or "🎬 Extracting")
+    return (
+        f"📄 {filename[:32]}\n"
+        f"📊 [{_progress_bar(int(pct))}] {pct:.1f}%\n"
+        f"{status[:22]}\n"
+        f"⏱ {_fmt_time(elapsed)}\n"
+        f"⏳ {_fmt_time(remaining)}\n"
+        f"⚡ {speed_text}\n"
+        f"📦 {current}/{count}\n"
+        f"👤 {str(username)[:20]}"
+    )[:200]
+
+
+def _stream_button_text(stream: dict, display_number: int) -> str:
+    codec = str(stream.get("codec_name") or "Unknown").upper()
+    kind = str(stream.get("codec_type") or "Stream").title()
+    label = _stream_label(stream, display_number).split(" (", 1)[0]
+    if kind == "Video" and not (stream.get("tags") or {}).get("title"):
+        label = "None"
+    short_labels = {
+        "English": "Eng", "Hindi": "Hin", "Tamil": "Tam",
+        "Telugu": "Tel", "Malayalam": "Mal", "Kannada": "Kan",
+        "Marathi": "Mar", "Bengali": "Ben",
+    }
+    label = short_labels.get(label, label or "None")
+    return f"{display_number} - {kind} - {label} - {codec}"
+
+
+def _stream_menu(token: str, streams: list[dict]) -> InlineKeyboardMarkup:
+    buttons = [
+        [InlineKeyboardButton(
+            _stream_button_text(stream, ordinal),
+            callback_data=f"stream_extract:one:{token}:{stream.get('index', ordinal)}",
+        )]
+        for ordinal, stream in enumerate(streams)
+    ]
+    buttons.append([
+        InlineKeyboardButton(
+            "🎵 All Audios", callback_data=f"stream_extract:audio:{token}"
+        ),
+        InlineKeyboardButton(
+            "💬 All Subtitles", callback_data=f"stream_extract:subtitle:{token}"
+        ),
+    ])
+    buttons.append([
+        InlineKeyboardButton(
+            "📦 Custom Streams", callback_data=f"stream_extract:custom:{token}"
+        ),
+        InlineKeyboardButton(
+            "📦 All Streams", callback_data=f"stream_extract:all:{token}"
+        ),
+    ])
+    buttons.append([
+        InlineKeyboardButton(
+            "❌ Cancel", callback_data=f"stream_extractor_cancel:{token}"
+        )
+    ])
+    return InlineKeyboardMarkup(buttons)
+
+
+def _stream_custom_menu(pending: dict) -> InlineKeyboardMarkup:
+    token = pending["token"]
+    selected = {int(item) for item in pending.get("custom_selected", [])}
+    streams = pending.get("streams") or []
+    buttons = []
+    for ordinal, stream in enumerate(streams):
+        index = int(stream.get("index", ordinal))
+        mark = "✅ " if index in selected else ""
+        buttons.append([InlineKeyboardButton(
+            mark + _stream_button_text(stream, ordinal),
+            callback_data=f"stream_custom_toggle:{token}:{index}",
+        )])
+    buttons.append([
+        InlineKeyboardButton(
+            "✅ Extract Selected", callback_data=f"stream_custom_done:{token}"
+        ),
+        InlineKeyboardButton(
+            "↩️ Back", callback_data=f"stream_extract:back:{token}"
+        ),
+    ])
+    return InlineKeyboardMarkup(buttons)
+
+
+def _stream_selection_note() -> str:
+    return (
+        "⭐ *Note:* In All Streams option all streams will be uploaded "
+        "except Video.\n\n"
+        "For single audio/video/subtitle, click the button that appears.\n\n"
+        "Select Your Required Option 👇"
+    )
+
+
+async def _start_stream_extraction_from_callback(
+    update, context, query, pending: dict, mode: str
+):
+    global _active_processes
+    task_id = _secrets.token_hex(8)
+    context.user_data["stream_extractor_task_id"] = task_id
+    context.user_data["stream_extractor_mode"] = mode
+    _active_processes += 1
+    info = {
+        "kind": "stream_extractor",
+        "task_id": task_id,
+        "process": None,
+        "start_time": time.time(),
+        "duration": 0.0,
+        "total_duration": 0.0,
+        "filename": pending["file_name"],
+        "file_name": pending["file_name"],
+        "message_id": query.message.message_id,
+        "chat_id": query.message.chat_id,
+        "speed_mbps": 0.0,
+        "pct": 0.0,
+        "elapsed": 0.0,
+        "status": "🎬 Extracting",
+        "phase": "extract",
+        "running": True,
+        "platform": "Stream Extractor",
+        "channel": {"channelCategoryId": "Stream Extractor"},
+        "user_obj": query.from_user,
+        "user_id": query.from_user.id,
+        "item_count": 1,
+        "completed_items": 0,
+    }
+    RECORDING_PROGRESS_INFO[task_id] = info
+    MEDIA_USER_TASKS[query.from_user.id] = task_id
+    context.user_data["stream_extractor_progress"] = info
+    await query.answer("Extraction started.", cache_time=0)
+    await query.edit_message_text(
+        _build_stream_status_text(
+            pending["file_name"], 0.0, None, "🎬 Extracting"
+        ),
+        reply_markup=_build_stream_progress_inline(),
+    )
+    updater = asyncio.create_task(
+        _auto_updater(
+            task_id,
+            query.message,
+            None,
+            pending["file_name"],
+            0.0,
+            info["start_time"],
+        )
+    )
+    ACTIVE_UPDATERS[task_id] = updater
+    asyncio.create_task(
+        _stream_extract_job(
+            update, context, pending, query.message, task_id, mode
+        )
+    )
+
+
+def _stream_extension_safe(codec_type: str, codec_name: str) -> bool:
+    # Copying common elementary streams is lossless. Unknown streams are still
+    # attempted with -c copy, but the output remains a container when needed.
+    return codec_type in {"audio", "subtitle", "video"} and bool(codec_name)
+
+
+async def _stream_upload_one(context, info: dict, status_message, output_path: str):
+    info["phase"] = "upload"
+    info["status"] = "📤 Uploading"
+    info["filename"] = os.path.basename(output_path)
+    info["file_name"] = os.path.basename(output_path)
+    info["upload_bytes"] = 0
+    info["upload_size"] = os.path.getsize(output_path)
+    info["upload_start"] = time.time()
+    info["pct"] = min(99.9, info.get("completed_items", 0) / max(1, info["item_count"]) * 100)
+    await status_message.edit_text(
+        f"✅ Extraction Completed\n\n"
+        f"📄 File:\n{os.path.basename(output_path)}\n\n"
+        "Uploading...",
+        reply_markup=_build_stream_progress_inline(),
+    )
+    with open(output_path, "rb") as raw:
+        wrapped = _ProgressUploadFile(raw, info)
+        telegram_input = InputFile(
+            wrapped, filename=os.path.basename(output_path), read_file_handle=False
+        )
+        await context.bot.send_document(
+            chat_id=status_message.chat_id,
+            document=telegram_input,
+            caption=os.path.basename(output_path),
+            read_timeout=1800,
+            write_timeout=1800,
+        )
+    if not info.get("running", True):
+        return False
+    await status_message.edit_text(
+        "✅ Upload Completed\n\n"
+        f"📄 File:\n{os.path.basename(output_path)}",
+        reply_markup=_build_stream_progress_inline(),
+    )
+    info["phase"] = "extract"
+    info["completed_items"] = int(info.get("completed_items") or 0) + 1
+    info["pct"] = info["completed_items"] / max(1, info["item_count"]) * 100
+    return True
+
+
+async def _stream_extract_job(update, context, pending: dict,
+                              status_message, task_id: str, mode: str):
+    global _active_processes
+    work_dir = f"/tmp/stream_extract_{task_id}"
+    os.makedirs(work_dir, exist_ok=True)
+    user = update.effective_user
+    info = RECORDING_PROGRESS_INFO.get(task_id)
+    input_path = os.path.join(work_dir, _media_safe_name(pending["file_name"], "input.mkv"))
+    try:
+        telegram_file = await context.bot.get_file(pending["file_id"])
+        await telegram_file.download_to_drive(custom_path=input_path)
+        probe = await _stream_probe_file(input_path)
+        requested_streams = pending.get("streams") or probe["streams"]
+        if mode == "one":
+            selected_index = int(pending.get("selected_stream_index", -1))
+            streams = [
+                item for item in requested_streams
+                if int(item.get("index", -1)) == selected_index
+            ]
+        elif mode == "custom":
+            selected = {
+                int(item) for item in pending.get("custom_selected", [])
+            }
+            streams = [
+                item for item in requested_streams
+                if int(item.get("index", -1)) in selected
+            ]
+        elif mode == "all":
+            # “All Streams” intentionally excludes video, matching the
+            # StreamExtractor menu shown to users.
+            streams = [
+                item for item in requested_streams
+                if item.get("codec_type") != "video"
+            ]
+        else:
+            streams = [
+                item for item in requested_streams
+                if item.get("codec_type") == mode
+            ]
+        if not streams:
+            await status_message.edit_text(
+                "❌ No matching streams found.\n\n"
+                f"Requested: {mode.title()}"
+            )
+            return
+        # Keep every audio track together in one multi-track container. The
+        # previous per-stream map (`-map 0:<index>`) produced one-track files,
+        # which made Telegram show only a single audio track.
+        if mode == "audio":
+            streams = [{
+                "codec_type": "audio",
+                "codec_name": "multi",
+                "tags": {"title": "All Audios"},
+                "_combined_audio": True,
+            }]
+        info["item_count"] = len(streams)
+        info["total_duration"] = probe["duration"]
+        info["source_path"] = input_path
+        info["source_size"] = os.path.getsize(input_path)
+        for ordinal, stream in enumerate(streams):
+            info = RECORDING_PROGRESS_INFO.get(task_id)
+            if not info or not info.get("running", True):
+                return
+            stream_index = int(stream.get("index", ordinal))
+            stream_kind = stream.get("codec_type") or "stream"
+            stream_name = (
+                _media_safe_name(
+                    f"{Path(pending['file_name']).stem}_all_audios.mkv"
+                )
+                if stream.get("_combined_audio")
+                else _stream_output_name(pending["file_name"], stream, ordinal)
+            )
+            output_path = os.path.join(work_dir, stream_name)
+            info["current_item"] = ordinal + 1
+            info["current_item_duration"] = probe["duration"]
+            info["current_stream_index"] = stream_index
+            info["filename"] = stream_name
+            info["file_name"] = stream_name
+            info["status"] = f"🎬 Extracting {stream_kind}"
+            info["phase"] = "extract"
+            info["pct"] = (ordinal / len(streams)) * 100
+            progress_file = os.path.join(work_dir, f"progress_{ordinal}.txt")
+            info["progress_file"] = progress_file
+            if stream.get("_combined_audio"):
+                metadata = await build_ffmpeg_metadata(
+                    input_path,
+                    selected_streams={"audio": None},
+                )
+                cmd = [
+                    "ffmpeg", "-hide_banner", "-y", "-i", input_path,
+                    "-map", "0:a?", "-map_metadata", "0", "-map_chapters", "0",
+                    "-c", "copy",
+                    "-progress", progress_file, "-nostats", output_path,
+                ]
+            else:
+                stream_type = str(stream.get("codec_type") or "")
+                source_type_ordinal = sum(
+                    1
+                    for prior in requested_streams
+                    if prior is stream
+                    or (
+                        prior.get("codec_type") == stream_type
+                        and int(prior.get("index", -1)) < stream_index
+                    )
+                ) - 1
+                metadata = await build_ffmpeg_metadata(
+                    input_path,
+                    selected_streams={stream_type: [source_type_ordinal]},
+                )
+                cmd = [
+                    "ffmpeg", "-hide_banner", "-y", "-i", input_path,
+                    "-map", f"0:{stream_index}", "-c", "copy",
+                    "-progress", progress_file, "-nostats", output_path,
+                ]
+            cmd[-1:-1] = metadata
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            info["process"] = proc
+            RECORDING_SESSION_PROC[task_id] = proc
+            stderr_task = asyncio.create_task(proc.stderr.read())
+            await proc.wait()
+            stderr = await stderr_task
+            RECORDING_SESSION_PROC.pop(task_id, None)
+            info["process"] = None
+            if not info.get("running", True):
+                return
+            if proc.returncode != 0 or not os.path.exists(output_path):
+                detail = stderr.decode(errors="replace")[-700:]
+                raise RuntimeError(f"{stream_kind} extraction failed: {detail}")
+            uploaded = await _stream_upload_one(
+                context, info, status_message, output_path
+            )
+            if not uploaded:
+                return
+            info["phase"] = "extract"
+            info["status"] = "🎬 Extracting"
+        info = RECORDING_PROGRESS_INFO.get(task_id)
+        if info and info.get("running", True):
+            await status_message.edit_text("✅ Upload Completed\n\n📄 All requested streams uploaded.")
+    except asyncio.CancelledError:
+        raise
     except Exception as exc:
-        job["done"] = True
+        logger.exception("Stream extraction failed")
+        info = RECORDING_PROGRESS_INFO.get(task_id)
+        cancelled = not info or not info.get("running", True)
         try:
-            await status_msg.edit_text(f"❌ FFmpeg error: `{exc}`", reply_markup=None)
+            await status_message.edit_text(
+                "❌ Extraction Cancelled\n\n⚠️ Partial Output Deleted"
+                if cancelled else
+                f"❌ Extraction Failed\n\n⚠️ Partial Output Deleted\n\n{str(exc)[:700]}"
+            )
         except Exception:
             pass
-
-
-# ---------------------------------------------------------------------------
-# Helper: auto-convert /rec-style shorthand to proper ffmpeg args
-# ---------------------------------------------------------------------------
-
-_TS_RE = re.compile(r"^\d{1,2}:\d{2}(?::\d{2})?$")
-
-
-def _rec_to_ffmpeg_args(args_text: str):
-    """Detect recording-style shorthand and convert to proper ffmpeg argument string.
-
-    Shorthand format:
-      /ffmpeg <url> [HH:MM:SS] [filename] [-cookie val] [-ua val] [-referer val]
-
-    Bot-specific flags converted:
-      -cookie   → -headers "Cookie: <val>\\r\\n"
-      -ua       → -user_agent "<val>"
-      -referer  → -headers "Referer: <val>\\r\\n"
-      -aes      → -decryption_key <val>
-
-    Returns (converted_args_str, notice_str) or (None, None) if not rec-style.
-    """
-    try:
-        tokens = shlex.split(args_text)
-    except ValueError:
-        tokens = args_text.split()
-
-    if not tokens or not tokens[0].startswith(("http://", "https://", "rtmp://", "rtmps://")):
-        return None, None
-
-    url  = tokens[0]
-    rest = tokens[1:]
-
-    # Optional: duration token (MM:SS or HH:MM:SS)
-    duration = None
-    if rest and _TS_RE.match(rest[0]):
-        duration = rest[0]
-        rest = rest[1:]
-
-    # Optional: output filename (no - prefix, not a URL)
-    filename = None
-    if rest and not rest[0].startswith("-") and "://" not in rest[0]:
-        filename = rest[0]
-        rest = rest[1:]
-
-    # Parse bot-specific flags from remaining tokens
-    flags = _parse_rec_flags(rest)
-
-    # Build input-side options (must appear before -i)
-    input_opts: list[str] = []
-    if flags.get("user_agent"):
-        input_opts.append(f"-user_agent {shlex.quote(flags['user_agent'])}")
-
-    header_parts: list[str] = []
-    if flags.get("cookie"):
-        header_parts.append(f"Cookie: {flags['cookie']}")
-    if flags.get("referer"):
-        header_parts.append(f"Referer: {flags['referer']}")
-    if flags.get("origin"):
-        header_parts.append(f"Origin: {flags['origin']}")
-    if header_parts:
-        hval = "\r\n".join(header_parts) + "\r\n"
-        input_opts.append(f"-headers {shlex.quote(hval)}")
-
-    if flags.get("aes_key"):
-        input_opts.append(f"-decryption_key {shlex.quote(flags['aes_key'])}")
-
-    # Output filename
-    if not filename:
-        filename = f"rec_{int(time.time())}"
-    if "." not in os.path.basename(filename):
-        filename += ".mkv"
-
-    # Assemble final ffmpeg args
-    parts = input_opts + [f"-i {shlex.quote(url)}"]
-    if duration:
-        parts.append(f"-t {duration}")
-    parts += ["-c copy", shlex.quote(filename)]
-
-    converted = " ".join(parts)
-    notice    = (
-        "ℹ️ **Recording shorthand detected — auto-converted to ffmpeg args:**\n"
-        f"`{converted}`\n\n"
-        "Running now…"
-    )
-    return converted, notice
-
-
-# ---------------------------------------------------------------------------
-# /ffmpeg command
-# ---------------------------------------------------------------------------
-
-@app.on_message(filters.command(["ffmpeg", "Ffmpeg"]))
-async def ffmpeg_cmd(client: Client, message: Message):
-    """Owner/Admin only: run ffmpeg — task mode if output file detected, else shell mode."""
-    uid = message.from_user.id if message.from_user else 0
-    if not (is_owner(uid) or is_admin(uid)):
-        return await message.reply_text("❌ Sirf Owner/Admin use kar sakte hain.")
-
-    # Use raw message text so quoted strings and multi-line pastes are preserved
-    raw = (message.text or message.caption or "").strip()
-    # Strip the command prefix (/ffmpeg or /Ffmpeg + optional @botname)
-    first_space = raw.find(" ")
-    args_text = raw[first_space:].strip() if first_space != -1 else ""
-    # Collapse backslash line-continuation markers (common in copy-pasted shell cmds)
-    args_text = re.sub(r"\s*\\\s*", " ", args_text).strip()
-    if not args_text:
-        return await message.reply_text(
-            "**Usage:** `/ffmpeg <arguments>`\n\n"
-            "Examples (raw ffmpeg):\n"
-            "`/ffmpeg -version`\n"
-            "`/ffmpeg -i https://stream.m3u8 -t 00:02:10 -c copy output.mkv`\n\n"
-            "Examples (recording shorthand — same as /rec flags):\n"
-            "`/ffmpeg https://stream.m3u8 00:01:00 FileName -ua \"MyApp\" -cookie \"hdntl=...\" -referer https://...`"
-        )
-
-    # Auto-detect /rec-style shorthand (URL first, bot flags)
-    converted, notice = _rec_to_ffmpeg_args(args_text)
-    if converted:
-        args_text = converted
-        await message.reply_text(notice, parse_mode=enums.ParseMode.MARKDOWN)
-
-    out_file = _detect_ff_output(args_text)
-    duration = _parse_ff_duration(args_text)
-
-    # ── Task mode (has output file) ─────────────────────────────────────────
-    if out_file:
-        task_id  = f"{uid % 10000:04d}{int(time.time()) % 100000}"
-        save_dir = join(DOWNLOAD_DIRECTORY, f"ff_{task_id}")
-        os.makedirs(save_dir, exist_ok=True)
-
-        # Redirect output to save_dir if relative path
-        if not os.path.isabs(out_file):
-            out_path  = join(save_dir, os.path.basename(out_file))
-            args_text = args_text.replace(out_file, out_path, 1)
-        else:
-            out_path = out_file
-
-        tot_str    = _ff_sec_to_hms(duration) if duration else "—"
-        status_msg = await message.reply_text(
-            f"🎬 **FFmpeg Task Running...**\n\n"
-            f"📡 **Stream Capture**\n"
-            f"[{'░' * 10}] 0%\n\n"
-            f"⏱️ Time : `00:00:00` / `{tot_str}`\n"
-            f"📦 Size : `—`\n"
-            f"🆔 Task : `{task_id}`",
-            reply_markup=_ffmpeg_running_kb(task_id),
-        )
-        ffmpeg_jobs[task_id] = {
-            "uid":          uid,
-            "chat_id":      message.chat.id,
-            "status_msg":   status_msg,
-            "output_file":  out_path,
-            "save_dir":     save_dir,
-            "duration":     duration,
-            "done":         False,
-            "cancelled":    False,
-            "proc":         None,
-            "cur_time_sec": 0.0,
-            "cur_size_kb":  0,
-        }
-        asyncio.create_task(_run_ffmpeg_task(client, args_text, task_id))
-
-    # ── Simple shell mode (-version, -formats, -h, etc.) ───────────────────
-    else:
-        wait_msg = await message.reply_text("⚙️ Running ffmpeg...")
-        try:
-            rc, stdout, stderr = await asyncio.wait_for(
-                runcmd(f"ffmpeg {args_text}"), timeout=300
-            )
-            # Prefer stdout (help/info output); fall back to stderr; combine both
-            # stdout first so -h / -formats / -protocols content is not lost
-            out_part = stdout.strip()
-            err_part = stderr.strip()
-            if out_part and err_part:
-                output = out_part + "\n\n--- stderr ---\n" + err_part
-            elif out_part:
-                output = out_part
-            else:
-                output = err_part
-            output = output or "(no output)"
-
-            icon = "✅ Done" if rc == 0 else f"❌ Exit code: {rc}"
-
-            if len(output) <= 3800:
-                await wait_msg.edit_text(
-                    f"{icon}\n\n```\n{output}\n```", parse_mode=None
-                )
-            else:
-                # Output too large for a message — send as downloadable file
-                tmp_out = join(DOWNLOAD_DIRECTORY, f"ffmpeg_out_{int(time.time())}.txt")
-                try:
-                    os.makedirs(DOWNLOAD_DIRECTORY, exist_ok=True)
-                    with open(tmp_out, "w", encoding="utf-8") as _f:
-                        _f.write(f"# ffmpeg {args_text}\n# {icon}\n\n")
-                        _f.write(output)
-                    preview = output[:800].strip()
-                    await wait_msg.edit_text(
-                        f"{icon}\n\n_(Output too large — sending as file)_\n\n"
-                        f"**Preview (first 800 chars):**\n```\n{preview}\n…\n```",
-                        parse_mode=None,
-                    )
-                    await message.reply_document(
-                        tmp_out,
-                        caption=f"{icon} — full ffmpeg output ({len(output):,} chars)",
-                        file_name="ffmpeg_output.txt",
-                    )
-                finally:
-                    try:
-                        os.remove(tmp_out)
-                    except Exception:
-                        pass
-        except asyncio.TimeoutError:
-            await wait_msg.edit_text("⏰ Timeout (5 min) — command took too long.")
-        except Exception as e:
-            await wait_msg.edit_text(f"❌ Error: `{e}`")
-
-
-@app.on_message(filters.command(["ffprobe", "Ffprobe"]))
-async def ffprobe_cmd(client: Client, message: Message):
-    """Owner/Admin only: run ffprobe with given arguments and return output."""
-    uid = message.from_user.id if message.from_user else 0
-    if not (is_owner(uid) or is_admin(uid)):
-        return await message.reply_text("❌ Sirf Owner/Admin use kar sakte hain.")
-
-    raw = (message.text or message.caption or "").strip()
-    first_space = raw.find(" ")
-    args_text = raw[first_space:].strip() if first_space != -1 else ""
-    args_text = re.sub(r"\s*\\\s*", " ", args_text).strip()
-    if not args_text:
-        return await message.reply_text(
-            "**Usage:** `/ffprobe <arguments>`\n\n"
-            "Example:\n"
-            "`/ffprobe -version`\n"
-            "`/ffprobe -v error -show_entries format=duration -i video.mp4`\n"
-            "`/ffprobe -user_agent \"Mozilla/5.0\" -i https://example.com/live.m3u8`"
-        )
-
-    wait_msg = await message.reply_text("🔍 Running ffprobe...")
-    try:
-        rc, stdout, stderr = await asyncio.wait_for(
-            runcmd(f"ffprobe {args_text}"), timeout=120
-        )
-        output = (stdout + stderr).strip() or "(no output)"
-        if len(output) > 3800:
-            output = "…(trimmed)\n" + output[-3800:]
-        icon = "✅ Done" if rc == 0 else f"❌ Exit code: {rc}"
-        await wait_msg.edit_text(f"{icon}\n\n```\n{output}\n```", parse_mode=None)
-    except asyncio.TimeoutError:
-        await wait_msg.edit_text("⏰ Timeout (2 min) — command took too long.")
-    except Exception as e:
-        await wait_msg.edit_text(f"❌ Error: `{e}`")
-
-
-# ---------------------------------------------------------------------------
-# FFmpeg progress & upload callbacks
-# ---------------------------------------------------------------------------
-
-@app.on_callback_query(filters.regex(r"^ffpg:\w+:(refresh|cancel|preview)$"))
-async def ffmpeg_progress_cb(client: Client, cq: CallbackQuery):
-    parts   = cq.data.split(":")
-    task_id = parts[1]
-    action  = parts[2]
-    job     = ffmpeg_jobs.get(task_id)
-
-    if not job:
-        return await cq.answer("❌ Task not found or already expired.", show_alert=True)
-    if cq.from_user.id != job["uid"]:
-        return await cq.answer("Not your task.", show_alert=True)
-
-    if action == "cancel":
-        job["cancelled"] = True
-        proc = job.get("proc")
-        if proc:
+    finally:
+        info = RECORDING_PROGRESS_INFO.get(task_id)
+        if info:
+            info["running"] = False
+        proc = RECORDING_SESSION_PROC.pop(task_id, None)
+        if proc and proc.returncode is None:
             try:
                 proc.kill()
             except Exception:
                 pass
-        return await cq.answer("❌ Cancelling…", show_alert=False)
+        updater = ACTIVE_UPDATERS.pop(task_id, None)
+        if updater and not updater.done():
+            updater.cancel()
+        RECORDING_PROGRESS_INFO.pop(task_id, None)
+        MEDIA_USER_TASKS.pop(user.id, None)
+        context.user_data.pop("stream_extractor_task_id", None)
+        context.user_data.pop("stream_extractor_pending", None)
+        context.user_data.pop("stream_extractor_mode", None)
+        context.user_data.pop("stream_extractor_progress", None)
+        STREAM_EXTRACTOR_PENDING.pop(pending.get("token"), None)
+        shutil.rmtree(work_dir, ignore_errors=True)
+        _active_processes = max(0, _active_processes - 1)
 
-    if action == "refresh":
-        if job.get("done"):
-            return await cq.answer("Task already finished.", show_alert=False)
-        dur          = job.get("duration", 0)
-        cur_time_sec = job.get("cur_time_sec", 0.0)
-        cur_size_kb  = job.get("cur_size_kb", 0)
-        pct          = min(100.0, cur_time_sec / dur * 100) if dur > 0 else 0.0
-        bar          = _ff_bar(pct)
-        size_str     = f"{cur_size_kb / 1024:.1f} MB" if cur_size_kb else "—"
-        tot_str      = _ff_sec_to_hms(dur) if dur else "—"
-        text = (
-            f"🎬 **FFmpeg Task Running...**\n\n"
-            f"📡 **Stream Capture**\n"
-            f"[{bar}] {pct:.0f}%\n\n"
-            f"⏱️ Time : `{_ff_sec_to_hms(cur_time_sec)}` / `{tot_str}`\n"
-            f"📦 Size : `{size_str}`\n"
-            f"🆔 Task : `{task_id}`"
+
+@require_verification
+async def stream_extractor_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    source = _media_reply_source(update.message.reply_to_message)
+    if not source:
+        await update.message.reply_text(
+            "❌ Reply to a video or video document with `/StreamExtractor`.",
+            parse_mode=ParseMode.MARKDOWN,
         )
-        try:
-            await cq.message.edit_text(text, reply_markup=_ffmpeg_running_kb(task_id))
-        except Exception:
-            pass
-        return await cq.answer("🔄 Refreshed!", show_alert=False)
-
-    if action == "preview":
-        out_file = job.get("output_file")
-        if not out_file or not os.path.exists(out_file):
-            return await cq.answer("⚠️ No output file yet for preview.", show_alert=True)
-        await cq.answer("🎬 Generating preview…")
-        save_dir     = job.get("save_dir", DOWNLOAD_DIRECTORY)
-        preview_path = join(save_dir, "preview.jpg")
-        rc, _, _ = await runcmd(
-            f"ffmpeg -y -hide_banner -loglevel error "
-            f"-sseof -30 -i {shlex.quote(out_file)} "
-            f"-vframes 1 -q:v 2 {shlex.quote(preview_path)}"
+        return
+    if source.get("file_size") and source["file_size"] > TELEGRAM_BOT_DOWNLOAD_LIMIT:
+        await update.message.reply_text(
+            f"❌ The video exceeds the Telegram Bot API download limit of {telegram_limit_text()}."
         )
-        if rc == 0 and os.path.exists(preview_path):
-            try:
-                await client.send_photo(
-                    job["chat_id"],
-                    photo=preview_path,
-                    caption=f"🎬 Preview — Task `{task_id}`",
-                )
-            except Exception as e:
-                await cq.answer(f"Send failed: {e}", show_alert=True)
-        else:
-            await cq.answer("⚠️ Could not generate preview.", show_alert=True)
-
-
-@app.on_callback_query(filters.regex(r"^ffup:\w+:(tg|gd|both|del|169)$"))
-async def ffmpeg_upload_cb(client: Client, cq: CallbackQuery):
-    parts   = cq.data.split(":")
-    task_id = parts[1]
-    dest    = parts[2]
-    job     = ffmpeg_jobs.get(task_id)
-
-    if not job:
-        return await cq.answer("❌ Task not found or already expired.", show_alert=True)
-    if cq.from_user.id != job["uid"]:
-        return await cq.answer("Not your task.", show_alert=True)
-
-    out_file = job.get("output_file")
-    save_dir = job.get("save_dir", DOWNLOAD_DIRECTORY)
-    uid      = job["uid"]
-    chat_id  = job["chat_id"]
-
-    if dest == "del":
-        ffmpeg_jobs.pop(task_id, None)
-        if save_dir and os.path.exists(save_dir):
-            import shutil as _shutil
-            _shutil.rmtree(save_dir, ignore_errors=True)
-        await cq.answer("🗑️ Deleted.", show_alert=False)
-        try:
-            await cq.message.edit_text("🗑️ File deleted.", reply_markup=None)
-        except Exception:
-            pass
         return
-
-    if not out_file or not os.path.exists(out_file):
-        return await cq.answer("⚠️ Output file not found.", show_alert=True)
-
-    # ── 16:9 crop/scale ──────────────────────────────────────────────────────
-    if dest == "169":
-        await cq.answer("🔲 Starting 16:9 crop…")
-        status_msg = cq.message
-        fname_169  = f"16x9_{int(time.time())}.mp4"
-        out_169    = join(save_dir, fname_169)
-        new_tid    = f"{uid % 10000:04d}{int(time.time()) % 100000}"
-        try:
-            await status_msg.edit_text(
-                f"🔲 **16:9 Crop Running...**\n\n"
-                f"[{'░' * 10}] 0%\n\n"
-                f"⏱️ Time : `00:00:00` / `—`\n"
-                f"📦 Size : `—`\n"
-                f"🆔 Task : `{new_tid}`",
-                reply_markup=_ffmpeg_running_kb(new_tid),
-            )
-        except Exception:
-            pass
-        dur_sec = int(job.get("cur_time_sec") or job.get("duration", 0))
-        ffmpeg_jobs[new_tid] = {
-            "uid":          uid,
-            "chat_id":      chat_id,
-            "status_msg":   status_msg,
-            "output_file":  out_169,
-            "save_dir":     save_dir,
-            "duration":     dur_sec,
-            "done":         False,
-            "cancelled":    False,
-            "proc":         None,
-            "cur_time_sec": 0.0,
-            "cur_size_kb":  0,
-        }
-        crop_args = (
-            f'-i {shlex.quote(out_file)} '
-            f'-vf "scale=1280:720:force_original_aspect_ratio=increase,crop=1280:720" '
-            f'-c:v libx264 -preset medium -crf 20 '
-            f'-c:a copy -movflags +faststart '
-            f'{shlex.quote(out_169)}'
-        )
-        asyncio.create_task(_run_ffmpeg_task(client, crop_args, new_tid))
+    if not await check_process_slot(update):
         return
-
-    if dest in ("gd", "both"):
-        if not (_gdrive_is_enabled() or is_user_connected(uid)):
-            return await cq.answer(
-                "☁️ Google Drive linked nahi hai!\n/DriveAuth se connect karein.",
-                show_alert=True,
-            )
-
-    await cq.answer("⬆️ Uploading…")
-    status_msg = cq.message
-    try:
-        await status_msg.edit_text("⬆️ Uploading… please wait.", reply_markup=None)
-    except Exception:
-        pass
-
-    fname   = os.path.basename(out_file)
-    dur_sec = int(job.get("cur_time_sec") or job.get("duration", 0))
-
-    if dest in ("tg", "both"):
-        upload_start = time.time()
-        try:
-            await split_and_send_video(
-                status_msg, out_file,
-                caption=f"🎬 **{BRAND_TITLE}**\n📁 `{fname}`",
-                duration=dur_sec,
-                thumb_path=None,
-                status_msg=status_msg,
-                progress=progress_for_pyrogram,
-                progress_args=(status_msg, upload_start, status_msg, save_dir, False),
-                _uid=uid, _chat_id=status_msg.chat.id,
-            )
-        except Exception as ue:
-            try:
-                await status_msg.edit_text(f"❌ Telegram upload failed: `{ue}`")
-            except Exception:
-                pass
-
-    if dest in ("gd", "both"):
-        await upload_and_notify(client, uid, out_file, fname)
-
-    schedule_retention_cleanup(save_dir)
-    ffmpeg_jobs.pop(task_id, None)
-
-
-# ---------------------------------------------------------------------------
-# /approve, /revoke, /pending — owner commands
-# ---------------------------------------------------------------------------
-
-@app.on_message(filters.command("approve") & AUTH)
-async def approve_cmd(client: Client, message: Message):
-    if not is_owner(message.from_user.id):
-        return await message.reply_text("Owner-only command.")
-    parts = message.command
-    if len(parts) < 2:
-        return await message.reply_text("Usage: `/approve <user_id> [days]`")
-    try:
-        uid  = int(parts[1])
-        days = int(parts[2]) if len(parts) > 2 else 0
-    except ValueError:
-        return await message.reply_text("Invalid user_id or days.")
-    data  = load_verified()
-    entry = {"approved_by": message.from_user.id, "approved_at": datetime.now(tz).isoformat()}
-    if days > 0:
-        entry["expires_at"] = (datetime.now(tz) + timedelta(days=days)).isoformat()
-        label = f"{days} days"
-    else:
-        label = "permanent"
-    data.setdefault("verified", {})[str(uid)] = entry
-    data.get("pending", {}).pop(str(uid), None)
-    save_verified(data)
-    await message.reply_text(f"✅ User `{uid}` approved ({label}).")
-    try:
-        await client.send_message(uid, f"✅ You are now verified ({label}). Use /rec to start.")
-    except Exception:
-        pass
-
-
-@app.on_message(filters.command("revoke") & AUTH)
-async def revoke_cmd(client: Client, message: Message):
-    if not is_owner(message.from_user.id):
-        return await message.reply_text("Owner-only command.")
-    parts = message.command
-    if len(parts) < 2:
-        return await message.reply_text("Usage: `/revoke <user_id>`")
-    try:
-        uid = int(parts[1])
-    except ValueError:
-        return await message.reply_text("Invalid user_id.")
-    data = load_verified()
-    removed = data.get("verified", {}).pop(str(uid), None)
-    save_verified(data)
-    if removed:
-        await message.reply_text(f"✅ Revoked access for `{uid}`.")
-    else:
-        await message.reply_text(f"User `{uid}` was not verified.")
-
-
-@app.on_message(filters.command("pending") & AUTH)
-async def pending_cmd(client: Client, message: Message):
-    if not is_owner(message.from_user.id):
-        return await message.reply_text("Owner-only command.")
-    data    = load_verified()
-    pending = data.get("pending", {})
-    if not pending:
-        return await message.reply_text("No pending verification requests.")
-    lines = ["**Pending Verification Requests**\n"]
-    for uid, info in pending.items():
-        lines.append(f"• `{uid}` — {info.get('name', 'N/A')} @{info.get('username', 'N/A')}")
-    await message.reply_text("\n".join(lines))
-
-
-# ---------------------------------------------------------------------------
-# /broadcast — owner/admin: send a message to all verified users
-# ---------------------------------------------------------------------------
-
-@app.on_message(filters.command("broadcast") & AUTH)
-async def broadcast_cmd(client: Client, message: Message):
-    uid = message.from_user.id
-    if not (is_owner(uid) or is_admin(uid)):
-        return
-
-    # Resolve broadcast text: either inline argument or a replied-to message
-    replied = message.reply_to_message
-    bcast_text: str = ""
-    bcast_media_msg = None
-
-    if replied:
-        bcast_media_msg = replied          # forward the original message
-        bcast_text      = replied.text or replied.caption or ""
-    else:
-        parts = message.command
-        if len(parts) < 2:
-            return await message.reply_text(
-                "**Usage:**\n"
-                "`/broadcast <your message>` — send text\n"
-                "Or **reply** to any message with `/broadcast` to forward it."
-            )
-        bcast_text = " ".join(parts[1:])
-
-    # Collect all known user IDs from verified.json + user_limits.json
-    vdata   = load_verified()
-    targets = set(int(k) for k in vdata.get("verified", {}).keys())
-
-    import limit_system as _ls
-    ls_data = _ls._load()
-    targets |= set(int(k) for k in ls_data.keys())
-
-    targets.discard(uid)          # don't send to sender
-    total = len(targets)
-
-    if total == 0:
-        return await message.reply_text("No users to broadcast to.")
-
-    status_msg = await message.reply_text(
-        f"📢 **Broadcasting to {total} users…**\n\n"
-        "⏳ Please wait…"
+    token = _secrets.token_hex(8)
+    probe_dir = f"/tmp/stream_probe_{token}"
+    os.makedirs(probe_dir, exist_ok=True)
+    probe_path = os.path.join(
+        probe_dir, _media_safe_name(source["file_name"], "input.mkv")
     )
-
-    sent = failed = blocked = 0
-    UPDATE_EVERY = max(1, total // 10)   # update progress every ~10%
-
-    for i, target_uid in enumerate(targets, 1):
-        try:
-            if bcast_media_msg:
-                await bcast_media_msg.forward(target_uid)
-            else:
-                await client.send_message(target_uid, bcast_text)
-            sent += 1
-        except Exception as e:
-            err = str(e).lower()
-            if "blocked" in err or "deactivated" in err or "forbidden" in err:
-                blocked += 1
-            else:
-                failed += 1
-
-        # Rate-limit: ~20 msg/s to stay under Telegram limits
-        await asyncio.sleep(0.05)
-
-        if i % UPDATE_EVERY == 0 or i == total:
-            try:
-                await status_msg.edit_text(
-                    f"📢 **Broadcasting…** {i}/{total}\n\n"
-                    f"✅ Sent: {sent}  |  🚫 Blocked: {blocked}  |  ❌ Failed: {failed}"
-                )
-            except Exception:
-                pass
-
-    await status_msg.edit_text(
-        f"📢 **Broadcast Complete!**\n\n"
-        f"👥 Total targeted : {total}\n"
-        f"✅ Sent           : {sent}\n"
-        f"🚫 Blocked/left   : {blocked}\n"
-        f"❌ Other errors   : {failed}"
-    )
-
-
-# ---------------------------------------------------------------------------
-# /stats — owner/admin: bot statistics + new users last 3 days
-# ---------------------------------------------------------------------------
-
-@app.on_message(filters.command("stats") & AUTH)
-async def stats_cmd(_, message: Message):
-    uid = message.from_user.id
-    if not (is_owner(uid) or is_admin(uid)):
-        return
-
-    now_ts  = time.time()
-    now_dt  = datetime.fromtimestamp(now_ts, tz)
-    THREE_DAYS_AGO = now_ts - 3 * 86400
-
-    # ── Limit-system data ────────────────────────────────────────────────────
-    ls_data      = _load()
-    total_users  = len(ls_data)
-    lucky_count  = sum(1 for u in ls_data.values() if u.get("is_lucky"))
-    has_credits  = sum(1 for u in ls_data.values() if u.get("rec_limit", 0) > 0)
-
-    # Group new users (joined_at present) by calendar day — last 3 days only
-    day_counts: dict = {}   # "DD Mon YYYY" -> count
-    new_total = 0
-    for user_rec in ls_data.values():
-        jt = user_rec.get("joined_at")
-        if jt and jt >= THREE_DAYS_AGO:
-            day_label = datetime.fromtimestamp(jt, tz).strftime("%d %b %Y")
-            day_counts[day_label] = day_counts.get(day_label, 0) + 1
-            new_total += 1
-
-    # ── Verified.json data ────────────────────────────────────────────────────
-    vdata          = load_verified()
-    verified_count = len(vdata.get("verified", {}))
-    pending_count  = len(vdata.get("pending", {}))
-
-    # ── Active recordings ────────────────────────────────────────────────────
-    active_recs = len(user_tasks)
-
-    # ── Admins ────────────────────────────────────────────────────────────────
-    admin_count = len(load_admins())
-
-    # ── Build message ─────────────────────────────────────────────────────────
-    lines = [
-        "📊 **BOT STATISTICS**",
-        "━━━━━━━━━━━━━━━━━━━━━━━━━━",
-        f"👥 **Total Users**     : {total_users}",
-        f"✅ **Verified**        : {verified_count}",
-        f"⏳ **Pending Verify**  : {pending_count}",
-        f"🎰 **Lucky Users**     : {lucky_count}",
-        f"🎬 **Active Recs**     : {active_recs}",
-        f"💳 **Users with Rec>0**: {has_credits}",
-        f"🛡️ **Admins**          : {admin_count}",
-        "",
-        f"📅 **New Users — Last 3 Days** ({new_total} total):",
-        "━━━━━━━━━━━━━━━━━━━━━━━━━━",
-    ]
-
-    if day_counts:
-        # Sort newest first
-        for day_label in sorted(day_counts, reverse=True):
-            count = day_counts[day_label]
-            bar   = "█" * min(count, 20)
-            lines.append(f"  📆 {day_label}  —  **{count}** user{'s' if count != 1 else ''}  {bar}")
-    else:
-        lines.append("  No new users in the last 3 days.")
-
-    lines += [
-        "━━━━━━━━━━━━━━━━━━━━━━━━━━",
-        f"⏰ {now_dt.strftime('%d-%m-%Y %I:%M %p IST')}",
-    ]
-
-    await message.reply_text("\n".join(lines))
-
-
-# ---------------------------------------------------------------------------
-# /plan
-# ---------------------------------------------------------------------------
-
-@app.on_message(filters.command(["plan", "plans"]) & AUTH)
-async def plan_cmd(client: Client, message: Message):
-    await message.reply_text(render_plans_text(), disable_web_page_preview=True)
-
-
-# ---------------------------------------------------------------------------
-# /contact
-# ---------------------------------------------------------------------------
-
-@app.on_message(filters.command("contact") & AUTH)
-async def contact_cmd(client: Client, message: Message):
-    await message.reply_text(
-        f"📬 **Contact & Support**\n\n"
-        f"💬 Support: @{SUPPORT_USERNAME}\n\n"
-        f"For subscriptions, custom requests, or issues — reach us on the channel or DM support."
-    )
-
-
-# ---------------------------------------------------------------------------
-# /channel — browse hidden-URL channel list (names only)
-# ---------------------------------------------------------------------------
-
-@app.on_message(filters.command("channel") & AUTH)
-async def channel_cmd(client: Client, message: Message):
-    await message.reply_text("**Browse channels**\n\nPick a channel:", reply_markup=_channel_root_kb())
-
-
-@app.on_callback_query(filters.regex(r"^ch:(.+)$"))
-async def cb_channel_select(client: Client, cq: CallbackQuery):
-    name = cq.data.split(":", 1)[1]
-    if name not in BOT_CHANNELS:
-        return await cq.answer("Channel not found.", show_alert=True)
-    await cq.answer(f"✅ {name} selected!")
-    await cq.message.reply_text(
-        f"📺 **{name}** select hua!\n\n"
-        f"Record karne ke liye:\n`/drec {name} HH:MM:SS`\n`/rec {name} HH:MM:SS`\n\n"
-        f"Example: `/drec {name} 00:30:00`"
-    )
-
-
-# ---------------------------------------------------------------------------
-# /search
-# ---------------------------------------------------------------------------
-
-@app.on_message(filters.command("search") & AUTH)
-async def search_cmd(client: Client, message: Message):
-    if len(message.command) < 2:
-        return await message.reply_text("Usage: `/search POGO`")
-    query = " ".join(message.command[1:]).lower()
-    found = [name for name in BOT_CHANNELS if query in name.lower()]
-    if not found:
-        return await message.reply_text(f"No channels found for `{query}`.")
-    lines = [f"🔍 **Results for `{query}`**\n"] + [f"📺 {n}" for n in found[:20]]
-    if len(found) > 20:
-        lines.append(f"\n…and {len(found) - 20} more.")
-    lines.append("\nRecord karne ke liye: `/drec <channel name> HH:MM:SS`")
-    await message.reply_text("\n\n".join(lines) if len(lines) <= 3 else "\n".join(lines))
-
-
-# ---------------------------------------------------------------------------
-# /statusme / /cancelme
-# ---------------------------------------------------------------------------
-
-@app.on_message(filters.command(["statusme", "status"]) & AUTH)
-async def statusme_cmd(client: Client, message: Message):
-    user_id = message.from_user.id
-    recs    = active_recs.get(user_id, {})
-    other   = user_status.get(user_id)
-
-    if not recs and not other:
-        return await message.reply_text("No active recording or job.")
-
-    lines = []
-    if recs:
-        lines.append(f"🎬 **Active Recordings ({len(recs)}/{MAX_CONCURRENT_REC}):**")
-        for i, (rid, entry) in enumerate(recs.items(), 1):
-            st = entry.get("status", {})
-            lines.append(
-                f"\n**#{i}** `{st.get('filename', '?')}`\n"
-                f"  ⏱ Progress: `{st.get('progress', '00:00:00')}` / `{st.get('target', '?')}`"
-            )
-        lines.append("\nUse /cancelme to stop all recordings.")
-    if other:
-        lines.append(
-            f"\n📡 **Active Job**\n"
-            f"File: `{other.get('filename', '?')}`\n"
-            f"Progress: `{other.get('progress', '?')}`"
-        )
-        if other.get("url"):
-            lines.append(f"URL: `{other['url'][:80]}{'…' if len(other.get('url',''))>80 else ''}`")
-    await message.reply_text("\n".join(lines))
-
-
-@app.on_message(filters.command(["cancelme", "cancel"]) & AUTH)
-async def cancelme_cmd(client: Client, message: Message):
-    user_id = message.from_user.id
-    recs    = active_recs.get(user_id, {})
-    has_other = user_id in user_tasks or user_id in reclink_jobs
-
-    if not recs and not has_other:
-        return await message.reply_text("No active recording or job to cancel.")
-
-    import psutil as _psutil
-
-    # Cancel all active /rec recordings
-    for rid, entry in list(recs.items()):
-        cancelled_recs.add((user_id, rid))
-        pid = entry.get("ffmpeg_pid")
-        if pid:
-            try:
-                _psutil.Process(pid).terminate()
-                LOG.info(f"Sent SIGTERM to FFmpeg pid={pid} rec={rid}")
-            except Exception as e:
-                LOG.warning(f"Could not terminate FFmpeg pid={pid}: {e}")
-        pt = entry.get("progress_task")
-        if pt:
-            pt.cancel()
-
-    # Cancel other job types (OTT download, compress, trim, etc.)
-    if user_id in user_tasks:
-        cancelled_users.add(user_id)
-        pid = user_ffmpeg_pids.get(user_id)
-        if pid:
-            try:
-                _psutil.Process(pid).terminate()
-            except Exception as e:
-                LOG.warning(f"Could not terminate FFmpeg pid={pid}: {e}")
-        if user_id in progress_tasks:
-            progress_tasks[user_id].cancel()
-
-    rl = reclink_jobs.get(user_id)
-    if rl and rl.get("task"):
-        rl["task"].cancel()
-
-    count = len(recs)
-    note  = f"{count} recording(s)" if count else "job"
-    await message.reply_text(
-        f"⏹ **Cancel signal sent** ({note}).\n\nIf files were partially recorded they will be uploaded now."
-    )
-
-
-# ---------------------------------------------------------------------------
-# /rec — pre-recording setup wizard entry
-# ---------------------------------------------------------------------------
-
-def _resolve_channel_prefix(message_text: str) -> str:
-    """If the text right after the /rec|/drec command starts with a known
-    BOT_CHANNELS name (case-insensitive, may contain spaces), swap that name
-    for its hidden stream URL and return the rewritten message text. The URL
-    itself is never shown back to the user — only used internally for FFmpeg.
-    """
-    space = message_text.find(" ")
-    if space == -1:
-        return message_text
-    cmd_part = message_text[:space]
-    rest     = message_text[space + 1:]
-    for name in sorted(BOT_CHANNELS, key=len, reverse=True):
-        name_len = len(name)
-        if rest[:name_len].lower() == name.lower() and (
-            len(rest) == name_len or rest[name_len] in " \t"
-        ):
-            remainder = rest[name_len:].strip()
-            return f"{cmd_part} {BOT_CHANNELS[name]} {remainder}".rstrip()
-    return message_text
-
-
-def _shlex_parse_rec(message_text: str):
-    """Return (url, timestamp, filename, flags_dict) from a /rec or /drec message text.
-    Uses shlex so quoted values with spaces work correctly.
-
-    Supports two formats:
-      Standard:  /rec <url> HH:MM:SS [filename] [flags...]
-      ffprobe:   /rec -user_agent "..." -headers "..." -i <url> -t HH:MM:SS [filename]
-    """
-    # Strip leading /command word (or 'ffprobe' if user pastes raw terminal command)
-    space = message_text.find(" ")
-    rest  = message_text[space:].strip() if space != -1 else ""
-
-    # Handle $'...' ANSI-C quoting from shell: $'Cookie: val\r\nOrigin: val\r\n'
-    # Convert to a regular single-quoted string with literal \r\n for our parser
-    rest = re.sub(
-        r"\$'((?:[^'\\]|\\.)*)'",
-        lambda m: "'" + m.group(1) + "'",
-        rest,
-    )
-
     try:
-        tokens = shlex.split(rest)
-    except ValueError:
-        tokens = rest.split()
-
-    if not tokens:
-        return None, None, None, {}
-
-    # ── ffprobe/ffmpeg style: first token starts with '-' ────────────────────
-    if tokens[0].startswith("-"):
-        flags        = _parse_rec_flags(tokens)
-        url          = flags.pop("input_url", None)
-        timestamp    = flags.pop("timestamp", None)
-        raw_filename = flags.pop("filename", DEFAULT_FILENAME)
-        if not url or not timestamp:
-            return None, None, None, {}
-        return url, timestamp, raw_filename, flags
-
-    # ── Standard format: url timestamp [filename] [flags...] ─────────────────
-    if len(tokens) < 2:
-        return None, None, None, {}
-    url       = tokens[0]
-    timestamp = tokens[1]
-    idx       = 2
-    raw_filename = DEFAULT_FILENAME
-    if idx < len(tokens) and not tokens[idx].startswith("-"):
-        raw_filename = tokens[idx]
-        idx = 3
-    flags = _parse_rec_flags(tokens[idx:])
-    # -i in trailing flags overrides positional URL
-    if flags.get("input_url"):
-        url = flags.pop("input_url")
-    # -t in trailing flags overrides positional timestamp
-    if flags.get("timestamp"):
-        timestamp = flags.pop("timestamp")
-    return url, timestamp, raw_filename, flags
-
-
-def _build_setup(user_id: int, message, url: str, timestamp: str,
-                  raw_filename: str, flags: dict) -> dict:
-    """Build a do_record setup dict from parsed URL, timestamp, filename, and flags."""
-    for bad in '/\\:*?"<>|':
-        raw_filename = raw_filename.replace(bad, "_")
-    return {
-        "user_id":               user_id,
-        "chat_id":               message.chat.id,
-        "orig_msg":              message,
-        "url":                   url,
-        "timestamp":             timestamp,
-        "duration_sec":          time_to_seconds(timestamp),
-        "filename":              raw_filename,
-        "watermark_on":          False,
-        "watermark_pos":         "bottom_right",
-        "watermark_text":        get_default_watermark(),
-        "audio_track":           [],
-        "auto_mode":             False,
-        "quality":               "original",
-        "aspect":                "none",
-        "step":                  -1,
-        "detected_audio_tracks": [],
-        # Inline flags
-        "aes_key":      flags.get("aes_key", ""),
-        "flag_cookie":  flags.get("cookie", ""),
-        "flag_ua":      flags.get("user_agent", ""),
-        "flag_referer": flags.get("referer", ""),
-        "flag_origin":  flags.get("origin", ""),
-        "license_url":  flags.get("license_url", ""),
-        "drm_scheme":   flags.get("drm_scheme", ""),
-    }
-
-
-@app.on_message(filters.command("rec") & AUTH)
-async def rec_cmd(client: Client, message: Message):
-    user_id  = message.from_user.id
-    msg_text = _resolve_channel_prefix(message.text or "")
-
-    if not is_verified(user_id):
-        return await message.reply_text("You must be **verified** to use /rec. Run /verify.")
-    if len(active_recs.get(user_id, {})) >= MAX_CONCURRENT_REC:
-        return await message.reply_text(
-            f"⚠️ You already have **{MAX_CONCURRENT_REC} recordings** running simultaneously.\n"
-            "Use /statusme to check them or /cancelme to cancel all."
+        telegram_file = await context.bot.get_file(source["file_id"])
+        await telegram_file.download_to_drive(custom_path=probe_path)
+        probe = await _stream_probe_file(probe_path)
+        streams = [
+            stream for stream in probe["streams"]
+            if stream.get("codec_type") in {"video", "audio", "subtitle"}
+        ]
+    except Exception as exc:
+        await update.message.reply_text(
+            f"❌ Stream detection failed.\n\n{str(exc)[:700]}"
         )
-
-    # ── CloudPlay / JSON-ish multi-line format ────────────────────────────────
-    #   Format A:  "user_agent": "..." -- "mpd_url": "...", -t HH:MM:SS
-    #   Format B:  "m3u8_url": "...", "headers": { "Cookie": "...", ... }  -t HH:MM:SS
-    _CP_KEYS = ('"mpd_url"', '"m3u8_url"', '"hls_url"', '"stream_url"')
-    if "--" in msg_text or any(k in msg_text for k in _CP_KEYS):
-        parsed = _parse_cloudplay_format(msg_text)
-        if parsed:
-            url, timestamp, raw_filename, flags = parsed
-            if not url or not timestamp:
-                return await message.reply_text(
-                    "❌ Could not parse the CloudPlay format.\n"
-                    "Make sure `mpd_url` / `m3u8_url` and `-t HH:MM:SS` are present."
-                )
-            setup = _build_setup(user_id, message, url, timestamp, raw_filename, flags)
-            asyncio.create_task(do_record(client, None, setup))
-            return
-
-    # ── Standard format: /rec url duration [filename] [flags...] ─────────────
-    if len(message.command) < 3:
-        return await message.reply_text(
-            "**Usage:** `/rec <link> HH:MM:SS <filename>`\n\n"
-            "Example: `/rec https://cdn.example.com/live.m3u8 01:30:00 MyShow`\n\n"
-            "**Inline flags** (can be on separate lines):\n"
-            "`-aes <hex>`     — AES-128 key (HLS)\n"
-            "`-cookie <v>`    — Cookie header\n"
-            "`-ua <v>`        — User-Agent\n"
-            "`-referer <v>`   — Referer header\n"
-            "`-origin <v>`    — Origin header (e.g. Hotstar)\n"
-            "`-license <url>` — ClearKey DRM license URL (MPD/DASH)\n\n"
-            "**CloudPlay multi-line format also supported** — paste directly."
-        )
-
-    # If any flags present → skip wizard, record directly
-    url, timestamp, raw_filename, flags = _shlex_parse_rec(msg_text)
-    if flags:
-        setup = _build_setup(user_id, message, url, timestamp, raw_filename, flags)
-        asyncio.create_task(do_record(client, None, setup))
+        shutil.rmtree(probe_dir, ignore_errors=True)
         return
-
-    await handle_record(client, message)
-
-
-# ---------------------------------------------------------------------------
-# /DirectRec — instant recording, no wizard
-# ---------------------------------------------------------------------------
-
-@app.on_message(filters.command(["DirectRec", "directrec", "drec", "dr"]) & AUTH)
-async def directrec_cmd(client: Client, message: Message):
-    user_id = message.from_user.id
-    if not is_verified(user_id):
-        return await message.reply_text("You must be **verified** to use /DirectRec. Run /verify.")
-    if len(active_recs.get(user_id, {})) >= MAX_CONCURRENT_REC:
-        return await message.reply_text(
-            f"⚠️ You already have **{MAX_CONCURRENT_REC} recordings** running simultaneously.\n"
-            "Use /statusme to check them or /cancelme to cancel all."
-        )
-
-    url, timestamp, raw_filename, flags = _shlex_parse_rec(_resolve_channel_prefix(message.text or ""))
-    if not url or not timestamp:
-        return await message.reply_text(
-            "**Usage:** `/drec <url|channel name> HH:MM:SS [filename] [flags]`\n\n"
-            "Example:\n"
-            "```\n/drec POGO 00:00:10\n"
-            "/drec https://cdn.example.com/live.m3u8 00:30:00 MyShow\n"
-            "-cookie \"token=abc123\"\n"
-            "-ua \"Mozilla/5.0\"\n"
-            "-referer \"https://example.com/\"\n"
-            "-aes 7a6ba0b06fd254538156f3c5d2366bcb\n```\n\n"
-            "**Flags** (optional, can be on separate lines):\n"
-            "`-aes <hex>`   — AES-128 decryption key (32-char hex)\n"
-            "`-cookie <v>`  — Cookie header value\n"
-            "`-ua <v>`      — User-Agent string\n"
-            "`-referer <v>` — Referer header\n"
-            "`-aio`         — Allow all input extensions"
-        )
-
-    setup = _build_setup(user_id, message, url, timestamp, raw_filename, flags)
-    asyncio.create_task(do_record(client, None, setup))
-
-
-# ---------------------------------------------------------------------------
-# Quick-paste: user sends an HLS URL directly as a text message
-# ---------------------------------------------------------------------------
-
-def _is_hls_url(text: str) -> bool:
-    t = (text or "").strip().lower()
-    return t.startswith(("http://", "https://", "//")) and ".m3u8" in t
-
-
-@app.on_message(filters.private & filters.text & AUTH)
-async def quick_rec_text(client: Client, message: Message):
-    user_id = message.from_user.id
-    text    = (message.text or "").strip()
-
-    # Pass commands to their own handlers (do NOT block them)
-    if text.startswith("/"):
-        message.continue_propagation()
-    if not _is_hls_url(text):
-        return
-    # Skip if user is typing watermark text
-    if user_id in _wm_text_pending:
-        return
-
-    if len(active_recs.get(user_id, {})) >= MAX_CONCURRENT_REC:
-        return await message.reply_text(
-            f"⚠️ You already have **{MAX_CONCURRENT_REC} recordings** running simultaneously.\n"
-            "Use /statusme to check them or /cancelme to cancel all."
-        )
-    if not is_verified(user_id):
-        return await message.reply_text("You must be **verified** to start recordings. Run /verify.")
-
-    message.command = ["rec", text, DEFAULT_REC_DURATION, DEFAULT_FILENAME]
-    await handle_record(client, message)
-
-
-# ---------------------------------------------------------------------------
-# Pre-recording setup wizard callback handler
-# ---------------------------------------------------------------------------
-
-@app.on_callback_query(filters.regex(r"^rs:"))
-async def rec_setup_cb(client: Client, cq: CallbackQuery):
-    parts   = cq.data.split(":")
-    uid_str = parts[1] if len(parts) > 1 else ""
-    action  = parts[2] if len(parts) > 2 else ""
-    val     = parts[3] if len(parts) > 3 else ""
-
-    try:
-        uid = int(uid_str)
-    except ValueError:
-        return await cq.answer("Invalid session.", show_alert=True)
-
-    if cq.from_user.id != uid:
-        return await cq.answer("This is not your setup menu.", show_alert=True)
-
-    setup = rec_setup_sessions.get(uid)
-    if not setup:
-        return await cq.answer("Setup session expired.", show_alert=True)
-
-    if action == "cancel":
-        rec_setup_sessions.pop(uid, None)
-        try:
-            await cq.message.edit_text("Recording setup cancelled.", reply_markup=None)
-        except Exception:
-            pass
-        return await cq.answer("Cancelled.")
-
-    # ---- Step 0: Audio track selection ----
-
-    if action == "audio_toggle":
-        try:
-            idx = int(val)
-        except ValueError:
-            return await cq.answer("Bad value.", show_alert=True)
-        tracks = setup.get("detected_audio_tracks", [])
-        sel    = list(setup["audio_track"])
-        if idx in sel:
-            sel.remove(idx)
-        else:
-            sel.append(idx)
-        if len(sel) >= len(tracks) and tracks:
-            sel = []
-        setup["audio_track"] = sel
-        lang = tracks[idx - 1].get("lang", "?").upper() if tracks and idx <= len(tracks) else f"T{idx}"
-        state = "✅" if (not setup["audio_track"] or idx in setup["audio_track"]) else "⬜"
-        await cq.answer(f"{state} {lang}")
-        try:
-            await cq.message.edit_text(_audio_step_text(setup), reply_markup=_kb_audio_step(setup))
-        except Exception:
-            pass
-        return
-
-    if action == "audio_select_all":
-        setup["audio_track"] = []
-        await cq.answer("✅ All Tracks selected")
-        try:
-            await cq.message.edit_text(_audio_step_text(setup), reply_markup=_kb_audio_step(setup))
-        except Exception:
-            pass
-        return
-
-    if action == "audio_select":
-        try:
-            idx = int(val)
-        except ValueError:
-            return await cq.answer("Bad value.", show_alert=True)
-        setup["audio_track"] = [] if idx == 0 else [idx]
-        tracks = setup.get("detected_audio_tracks", [])
-        label  = "All Tracks" if not setup["audio_track"] else (
-            _audio_track_label(tracks[idx - 1]) if tracks and idx <= len(tracks) else f"Track {idx}"
-        )
-        await cq.answer(f"🎙 {label}")
-        try:
-            await cq.message.edit_text(_audio_step_text(setup), reply_markup=_kb_audio_step(setup))
-        except Exception:
-            pass
-        return
-
-    if action == "next_wm":
-        setup["step"] = 1
-        await cq.answer()
-        try:
-            await cq.message.edit_text(_setup_summary(setup), reply_markup=_kb_step1(setup))
-        except Exception:
-            pass
-        return
-
-    if action == "back_audio":
-        setup["step"] = 0
-        await cq.answer()
-        try:
-            await cq.message.edit_text(_audio_step_text(setup), reply_markup=_kb_audio_step(setup))
-        except Exception:
-            pass
-        return
-
-    # ---- Step 1: Watermark ----
-
-    if action == "wm_toggle":
-        setup["watermark_on"] = not setup["watermark_on"]
-        await cq.answer(f"Watermark {'ON' if setup['watermark_on'] else 'OFF'}")
-        try:
-            await cq.message.edit_text(_setup_summary(setup), reply_markup=_kb_step1(setup))
-        except Exception:
-            pass
-        return
-
-    if action == "wm_pos":
-        setup["watermark_pos"] = val
-        setup["watermark_on"]  = True
-        await cq.answer(f"Position: {val.replace('_', ' ').title()}")
-        try:
-            await cq.message.edit_text(_setup_summary(setup), reply_markup=_kb_step1(setup))
-        except Exception:
-            pass
-        return
-
-    if action == "wm_text":
-        _wm_text_pending.add(uid)
-        await cq.answer("Send your watermark text now.")
-        try:
-            await cq.message.edit_text(
-                "✏️ **Send your watermark text** as the next message.\n\n"
-                "Example: `Anime Cartoon`",
-                reply_markup=None,
-            )
-        except Exception:
-            pass
-        return
-
-    if action == "audio_cycle":
-        tracks = setup.get("detected_audio_tracks", [])
-        at     = setup["audio_track"]
-        if not at:
-            setup["audio_track"] = [1] if tracks else []
-        elif len(at) == 1 and at[0] < len(tracks):
-            setup["audio_track"] = [at[0] + 1]
-        else:
-            setup["audio_track"] = []
-        at_new = setup["audio_track"]
-        label  = "All" if not at_new else f"Track {at_new[0]}"
-        await cq.answer(f"Audio: {label}")
-        try:
-            await cq.message.edit_text(_setup_summary(setup), reply_markup=_kb_step1(setup))
-        except Exception:
-            pass
-        return
-
-    if action == "auto_toggle":
-        setup["auto_mode"] = not setup["auto_mode"]
-        await cq.answer(f"Auto mode: {'ON' if setup['auto_mode'] else 'OFF'}")
-        try:
-            await cq.message.edit_text(_setup_summary(setup), reply_markup=_kb_step1(setup))
-        except Exception:
-            pass
-        return
-
-    if action == "next_quality":
-        setup["step"] = 2
-        await cq.answer()
-        try:
-            await cq.message.edit_text(_setup_summary(setup), reply_markup=_kb_step2(setup))
-        except Exception:
-            pass
-        return
-
-    if action == "quality":
-        setup["quality"] = val
-        await cq.answer(f"Quality: {val}p" if val != "original" else "Quality: Original")
-        try:
-            await cq.message.edit_text(_setup_summary(setup), reply_markup=_kb_step2(setup))
-        except Exception:
-            pass
-        return
-
-    if action == "back_step1":
-        setup["step"] = 1
-        await cq.answer()
-        try:
-            await cq.message.edit_text(_setup_summary(setup), reply_markup=_kb_step1(setup))
-        except Exception:
-            pass
-        return
-
-    if action == "next_aspect":
-        setup["step"] = 3
-        await cq.answer()
-        try:
-            await cq.message.edit_text(_setup_summary(setup), reply_markup=_kb_step3(setup))
-        except Exception:
-            pass
-        return
-
-    if action == "aspect":
-        setup["aspect"] = val
-        await cq.answer(f"Aspect: {val}")
-        try:
-            await cq.message.edit_text(_setup_summary(setup), reply_markup=_kb_step3(setup))
-        except Exception:
-            pass
-        return
-
-    if action == "back_step2":
-        setup["step"] = 2
-        await cq.answer()
-        try:
-            await cq.message.edit_text(_setup_summary(setup), reply_markup=_kb_step2(setup))
-        except Exception:
-            pass
-        return
-
-    if action == "start":
-        rec_setup_sessions.pop(uid, None)
-        await cq.answer("Starting recording...")
-        try:
-            await cq.message.edit_text("⚙️ Starting recording with your settings...", reply_markup=None)
-        except Exception:
-            pass
-        asyncio.create_task(do_record(client, cq, setup))
-        return
-
-    await cq.answer()
-
-
-# ---------------------------------------------------------------------------
-# Watermark text input handler
-# ---------------------------------------------------------------------------
-
-def _wm_filter(_, __, m: Message) -> bool:
-    return bool(m.from_user and m.from_user.id in _wm_text_pending)
-
-
-_wm_filter_obj = filters.create(_wm_filter)
-
-
-@app.on_message(filters.private & filters.text & _wm_filter_obj)
-async def wm_text_input(client: Client, message: Message):
-    # Pass commands to their own handlers
-    if (message.text or "").strip().startswith("/"):
-        message.continue_propagation()
-    user_id = message.from_user.id
-    _wm_text_pending.discard(user_id)
-    setup = rec_setup_sessions.get(user_id)
-    if not setup:
-        return
-    setup["watermark_text"] = (message.text or "").strip() or get_default_watermark()
-    setup["watermark_on"]   = True
-    try:
-        setup_msg = await client.get_messages(setup["chat_id"], setup.get("setup_msg_id"))
-        await setup_msg.edit_text(_setup_summary(setup), reply_markup=_kb_step1(setup))
-    except Exception:
-        pass
-    await message.reply_text(f"✅ Watermark text set to: `{setup['watermark_text']}`")
-
-
-# ---------------------------------------------------------------------------
-# Cookies management
-# ---------------------------------------------------------------------------
-
-@app.on_message(filters.command("set_cookies") & AUTH)
-async def set_cookies_cmd(client: Client, message: Message):
-    user_id = message.from_user.id
-    pending_cookies_users[user_id] = time.time()
-    await message.reply_text(
-        "📎 **Send your `cookies.txt` file** (Netscape HTTP Cookie File format).\n\n"
-        "Export it from your browser using a cookies extension.\n"
-        "You have **5 minutes** to send the file."
-    )
-
-
-@app.on_message(filters.command("cookies_status") & AUTH)
-async def cookies_status_cmd(client: Client, message: Message):
-    user_id = message.from_user.id
-    await message.reply_text(_cookies_summary(user_id))
-
-
-@app.on_message(filters.command("del_cookies") & AUTH)
-async def del_cookies_cmd(client: Client, message: Message):
-    user_id = message.from_user.id
-    path    = _user_cookies_path(user_id)
-    if os.path.exists(path):
-        try:
-            os.remove(path)
-            await message.reply_text("✅ Cookies deleted.")
-        except Exception as e:
-            await message.reply_text(f"Failed to delete cookies: `{e}`")
-    else:
-        await message.reply_text("No cookies stored.")
-
-
-@app.on_message(filters.private & filters.document & AUTH, group=0)
-async def cookies_document_handler(client: Client, message: Message):
-    user_id = message.from_user.id
-    if user_id not in pending_cookies_users:
-        return
-
-    prompt_time = pending_cookies_users.get(user_id, 0)
-    if time.time() - prompt_time > _COOKIE_PROMPT_TTL_SEC:
-        pending_cookies_users.pop(user_id, None)
-        return await message.reply_text("Cookie upload window expired. Run /set_cookies again.")
-
-    pending_cookies_users.pop(user_id, None)
-    doc = message.document
-    if not doc:
-        return
-
-    filename = (doc.file_name or "").lower()
-    if not (filename.endswith(".txt") or filename.endswith(".cookies")):
-        return await message.reply_text(
-            "Please send a `.txt` file in Netscape cookie format."
-        )
-    if doc.file_size and doc.file_size > _MAX_COOKIE_FILE_BYTES:
-        return await message.reply_text(
-            f"File too large ({doc.file_size // 1024} KB). Max is 2 MB."
-        )
-
-    status = await message.reply_text("⬇️ Downloading cookie file...")
-    try:
-        tmp_path = _user_cookies_path(user_id) + ".tmp"
-        await message.download(file_name=tmp_path)
-        with open(tmp_path, "r", encoding="utf-8", errors="ignore") as f:
-            header = f.read(64)
-        if _NETSCAPE_HEADER not in header:
-            os.remove(tmp_path)
-            return await status.edit_text(
-                "**Invalid format.**\n\nThe file must start with:\n"
-                "`# Netscape HTTP Cookie File`\n\n"
-                "Export cookies from your browser using a cookies extension."
-            )
-        os.replace(tmp_path, _user_cookies_path(user_id))
-        await status.edit_text(f"✅ Cookies saved!\n\n{_cookies_summary(user_id)}")
-    except Exception as e:
-        LOG.error(f"Cookie upload failed for {user_id}: {e}")
-        try:
-            await status.edit_text(f"Failed to save cookies: `{e}`")
-        except Exception:
-            pass
-
-
-# ---------------------------------------------------------------------------
-# /download — OTT downloader with manifest-probed quality + multi-audio wizard
-# ---------------------------------------------------------------------------
-
-@app.on_message(filters.command("download") & AUTH)
-async def download_cmd(client: Client, message: Message):
-    user_id = message.from_user.id
-    if not is_verified(user_id):
-        return await message.reply_text("You must be **verified** to use /download. Run /verify.")
-    if user_id in user_tasks:
-        return await message.reply_text("⏳ You already have an active job. Use /statusme or /cancelme.")
-    if len(message.command) < 2:
-        return await message.reply_text(
-            "**Usage:** `/download <url> [filename]`\n\n"
-            "Example:\n`/download https://www.hotstar.com/1260093240 MyShow`\n\n"
-            "Supported: Hotstar, JioCinema, ZEE5, SonyLIV, Voot, MX Player, YouTube, and more.\n\n"
-            "For login-gated content, upload cookies first with /set_cookies."
-        )
-
-    parts        = message.text.split(maxsplit=2)
-    url          = parts[1].strip()
-    raw_filename = parts[2].strip() if len(parts) > 2 else ""
-    for bad in '/\\:*?"<>|':
-        raw_filename = raw_filename.replace(bad, "_")
-
-    cookies_path = _user_cookies_path(user_id) if _user_has_cookies(user_id) else ""
-
-    probe_msg = await message.reply_text(
-        f"🔍 **Probing manifest…**\n\n"
-        f"🔗 `{url[:60]}{'…' if len(url)>60 else ''}`\n\n"
-        f"_Fetching available video qualities and audio tracks…_"
-    )
-
-    try:
-        probe = await asyncio.to_thread(_probe_url_formats, url, cookies_path)
-    except Exception as _ex:
-        LOG.warning(f"Manifest probe failed uid={user_id}: {_ex}")
-        probe = {"title": "", "video_formats": [], "audio_formats": []}
-
-    vfmts = probe["video_formats"]
-    afmts = probe["audio_formats"]
-    title = probe.get("title") or ""
-
-    # Pre-select audio tracks matching user's default language preference
-    _pref_lang = (user_dl_prefs.get(user_id) or {}).get("default_audio_lang", "")
-    _pre_sel_audio: list = []
-    if _pref_lang and afmts:
-        for _f in afmts:
-            if _pref_lang.lower() in (_f.get("lang_name") or "").lower():
-                _pre_sel_audio.append(_f["id"])
-
-    ott_sessions[user_id] = {
-        "url":           url,
-        "filename":      raw_filename,
-        "message":       message,
-        "msg":           probe_msg,
-        "cookies_path":  cookies_path,
-        "phase":         "video",
-        "probe_title":   title,
-        "video_formats": vfmts,
-        "audio_formats": afmts,
-        "sel_video_id":  "best",
-        "sel_audio_ids": _pre_sel_audio,
-        "default_lang":  _pref_lang,
-    }
-
-    if vfmts:
-        text = _dl_status_text(ott_sessions[user_id])
-        kb   = _dl_video_keyboard(user_id, vfmts, "best")
-    else:
-        text = (
-            f"🎬 **Select Quality**\n\n"
-            f"🔗 `{url[:60]}{'…' if len(url)>60 else ''}`\n"
-            + (f"📌 **{title[:60]}**\n\n" if title else "\n")
-            + f"_(Manifest not parseable — choose generic quality)_"
-        )
-        kb = _dl_fallback_keyboard(user_id, "best")
-
-    try:
-        await probe_msg.edit_text(text, reply_markup=kb)
-    except Exception:
-        pass
-
-
-@app.on_callback_query(filters.regex(r"^dl:(\d+):([^:]+):?(.*)$"))
-async def cb_dl_wizard(client: Client, cq: CallbackQuery):
-    parts  = cq.data.split(":", 3)
-    uid    = int(parts[1])
-    action = parts[2]
-    value  = parts[3] if len(parts) > 3 else ""
-
-    if cq.from_user.id != uid:
-        return await cq.answer("This is not your download.", show_alert=True)
-
-    sess = ott_sessions.get(uid)
-    if not sess:
-        await cq.answer("Session expired. Run /download again.", show_alert=True)
-        try:
-            await cq.message.delete()
-        except Exception:
-            pass
-        return
-
-    vfmts = sess.get("video_formats") or []
-    afmts = sess.get("audio_formats") or []
-
-    if action == "cancel":
-        ott_sessions.pop(uid, None)
-        await cq.answer("Cancelled.")
-        try:
-            await cq.message.edit_text("❌ Download cancelled.", reply_markup=None)
-        except Exception:
-            pass
-        return
-
-    if action == "phase":
-        sess["phase"] = value
-        await cq.answer()
-        if value == "audio":
-            if not afmts:
-                return await cq.answer("No separate audio tracks found — best audio will be used.", show_alert=True)
-            try:
-                await cq.message.edit_text(
-                    _dl_status_text(sess),
-                    reply_markup=_dl_audio_keyboard(
-                        uid, afmts, sess.get("sel_audio_ids") or [],
-                        default_lang=sess.get("default_lang") or ""
-                    )
-                )
-            except Exception:
-                pass
-        else:
-            try:
-                await cq.message.edit_text(
-                    _dl_status_text(sess) if vfmts else f"🎬 **Select Quality**\n\n🔗 `{sess.get('url','')[:55]}`",
-                    reply_markup=(_dl_video_keyboard(uid, vfmts, sess.get("sel_video_id") or "best")
-                                  if vfmts else _dl_fallback_keyboard(uid, sess.get("sel_video_id") or "best"))
-                )
-            except Exception:
-                pass
-        return
-
-    if action == "v":
-        sess["sel_video_id"] = value
-        qlabel = ("Best Available" if value == "best"
-                  else next((f"{f['height']}p" for f in vfmts if f["id"] == value), value))
-        await cq.answer(f"🎥 {qlabel}")
-        try:
-            await cq.message.edit_text(
-                _dl_status_text(sess),
-                reply_markup=_dl_video_keyboard(uid, vfmts, value) if vfmts else _dl_fallback_keyboard(uid, value)
-            )
-        except Exception:
-            pass
-        return
-
-    _def_lang = sess.get("default_lang") or ""
-
-    if action == "a":
-        sel = sess.setdefault("sel_audio_ids", [])
-        if value in sel:
-            sel.remove(value)
-            toggled = False
-        else:
-            sel.append(value)
-            toggled = True
-        alabel = next((f"{f['lang_name']} {f['codec_label']}" for f in afmts if f["id"] == value), value)
-        await cq.answer(f"{'✅' if toggled else '○'} {alabel}")
-        try:
-            await cq.message.edit_text(_dl_status_text(sess),
-                                        reply_markup=_dl_audio_keyboard(uid, afmts, sel,
-                                                                         default_lang=_def_lang))
-        except Exception:
-            pass
-        return
-
-    if action == "aall":
-        sess["sel_audio_ids"] = [f["id"] for f in afmts]
-        await cq.answer(f"✅ All {len(afmts)} audio tracks selected")
-        try:
-            await cq.message.edit_text(_dl_status_text(sess),
-                                        reply_markup=_dl_audio_keyboard(uid, afmts, sess["sel_audio_ids"],
-                                                                         default_lang=_def_lang))
-        except Exception:
-            pass
-        return
-
-    if action == "abest":
-        sess["sel_audio_ids"] = []
-        await cq.answer("🏆 Best audio only")
-        try:
-            await cq.message.edit_text(_dl_status_text(sess),
-                                        reply_markup=_dl_audio_keyboard(uid, afmts, [],
-                                                                         default_lang=_def_lang))
-        except Exception:
-            pass
-        return
-
-    if action == "q":   # fallback generic quality
-        sess["sel_video_id"] = value
-        await cq.answer(f"Quality: {_DL_QUALITY_OPTS.get(value, ('?',))[0]}")
-        try:
-            await cq.message.edit_reply_markup(reply_markup=_dl_fallback_keyboard(uid, value))
-        except Exception:
-            pass
-        return
-
-    if action == "go":
-        await cq.answer("⬇️ Starting download…")
-        orig_message  = sess["message"]
-        status_msg    = sess.get("msg")
-        sel_video_id  = sess.get("sel_video_id") or "best"
-        sel_audio_ids = list(sess.get("sel_audio_ids") or [])
-        _url          = sess.get("url") or ""
-        _filename     = sess.get("filename") or ""
-        # Fallback: if sel_video_id is a generic key (e.g. "1080"), use format string
-        _legacy_fmt   = ""
-        if sel_video_id in _DL_QUALITY_OPTS:
-            _legacy_fmt  = _DL_QUALITY_OPTS[sel_video_id][1]
-            sel_video_id = "best"
-        vfmts_snap    = list(vfmts)
-        afmts_snap    = list(afmts)
-        ott_sessions.pop(uid, None)
-
-        async def _ott_task():
-            try:
-                await handle_ott_download(
-                    client, orig_message,
-                    url=_url, filename=_filename,
-                    video_id=sel_video_id,
-                    audio_ids=sel_audio_ids,
-                    video_formats=vfmts_snap,
-                    audio_formats=afmts_snap,
-                    fmt=_legacy_fmt,
-                    status_msg=status_msg,
-                )
-            except Exception as _ex:
-                LOG.error(f"OTT download task crashed: {_ex}", exc_info=True)
-                try:
-                    await orig_message.reply_text(f"❌ Download crashed: `{_ex}`")
-                except Exception:
-                    pass
-        asyncio.create_task(_ott_task())
-
-
-# ---------------------------------------------------------------------------
-# Upload destination choice callback (Telegram / Google Drive / Both)
-# ---------------------------------------------------------------------------
-
-@app.on_callback_query(filters.regex(r"^upl_ch:(\d+):(tg|gd|both|cancel)$"))
-async def cb_upl_choice(client: Client, cq: CallbackQuery):
-    uid  = int(cq.data.split(":")[1])
-    dest = cq.data.split(":")[2]
-    if cq.from_user.id != uid:
-        return await cq.answer("Not your upload.", show_alert=True)
-    state = pending_upload_state.get(uid)
-    if not state:
-        return await cq.answer("Already processed or expired.", show_alert=True)
-    state["dest"][0] = dest
-    state["ev"].set()
-    labels = {"tg": "📤 Uploading to Telegram…",
-              "gd": "☁️ Uploading to Google Drive…",
-              "both": "📤+☁️ Uploading to both…",
-              "cancel": "❌ Cancelled"}
-    await cq.answer(labels.get(dest, dest))
-    try:
-        await cq.message.edit_text(labels.get(dest, "Processing…"), reply_markup=None)
-    except Exception:
-        pass
-
-
-# ---------------------------------------------------------------------------
-# /audioDefault — set preferred default audio language for /download wizard
-# ---------------------------------------------------------------------------
-
-_KNOWN_LANGS = {
-    "hindi": "Hindi", "hin": "Hindi", "hi": "Hindi",
-    "tamil": "Tamil", "tam": "Tamil", "ta": "Tamil",
-    "telugu": "Telugu", "tel": "Telugu", "te": "Telugu",
-    "kannada": "Kannada", "kan": "Kannada", "kn": "Kannada",
-    "malayalam": "Malayalam", "mal": "Malayalam", "ml": "Malayalam",
-    "english": "English", "eng": "English", "en": "English",
-    "bengali": "Bengali", "ben": "Bengali", "bn": "Bengali",
-    "marathi": "Marathi", "mar": "Marathi", "mr": "Marathi",
-    "punjabi": "Punjabi", "pan": "Punjabi", "pa": "Punjabi",
-    "none": "", "off": "", "clear": "",
-}
-
-@app.on_message(filters.command("audioDefault") & AUTH)
-async def audio_default_cmd(_client: Client, message: Message):
-    user_id = message.from_user.id
-    if not is_verified(user_id):
-        return await message.reply_text("You must be **verified** to use /audioDefault. Run /verify.")
-
-    parts = message.text.split(maxsplit=1)
-    if len(parts) < 2:
-        cur = (user_dl_prefs.get(user_id) or {}).get("default_audio_lang") or "_(not set)_"
-        return await message.reply_text(
-            "🔊 **Default Audio Language**\n\n"
-            f"Current setting: `{cur}`\n\n"
-            "**Usage:** `/audioDefault <language>`\n\n"
-            "**Examples:**\n"
-            "`/audioDefault Tamil` — Tamil track auto-selected & set as default\n"
-            "`/audioDefault Hindi` — Hindi track auto-selected & set as default\n"
-            "`/audioDefault none` — Clear preference\n\n"
-            "**Supported:** Hindi, Tamil, Telugu, Kannada, Malayalam, English, Bengali, Marathi, Punjabi\n\n"
-            "When `/download` opens, the matching audio track will be **pre-ticked ✅** and "
-            "on multi-track downloads it will be set as the **default playback track** in the video file."
-        )
-
-    raw = parts[1].strip().lower()
-    resolved = _KNOWN_LANGS.get(raw)
-    if resolved is None:
-        # Try substring match on display names
-        resolved_key = next(
-            (v for k, v in _KNOWN_LANGS.items() if raw in k or k in raw), None
-        )
-        if resolved_key is None:
-            return await message.reply_text(
-                f"❌ Unknown language: `{parts[1].strip()}`\n\n"
-                "Try: `Tamil`, `Hindi`, `Telugu`, `Kannada`, `Malayalam`, `English`, `Bengali`, `none`"
-            )
-        resolved = resolved_key
-
-    if not resolved:
-        user_dl_prefs.pop(user_id, None)
-        return await message.reply_text("✅ Default audio preference cleared.")
-
-    user_dl_prefs.setdefault(user_id, {})["default_audio_lang"] = resolved
-    await message.reply_text(
-        f"✅ **Default audio set to `{resolved}`**\n\n"
-        f"Next time you use `/download`:\n"
-        f"• The **{resolved}** track will be **pre-ticked ✅** in the audio menu\n"
-        f"• If multi-track is downloaded, **{resolved}** will be the **default playback track** "
-        f"(video players auto-play it on open)\n\n"
-        f"Use `/audioDefault none` to clear."
-    )
-
-
-# ---------------------------------------------------------------------------
-# /compress — compress a replied video
-# ---------------------------------------------------------------------------
-
-@app.on_message(filters.command("compress") & AUTH)
-async def compress_cmd(client: Client, message: Message):
-    user_id = message.from_user.id
-    if not is_verified(user_id):
-        return await message.reply_text("You must be **verified** to use /compress. Run /verify.")
-    if user_id in user_tasks or user_id in compress_jobs:
-        return await message.reply_text("You already have an active job. Use /statusme or /cancelme.")
-
-    src_msg, src_media = _get_replied_video(message)
-    if not src_media:
-        return await message.reply_text(
-            "**Send a video with** `/compress` **as the caption**, or reply to a video with `/compress`."
-        )
-
-    save_dir = join(DOWNLOAD_DIRECTORY, f"cmp_{int(time.time())}")
-    os.makedirs(save_dir, exist_ok=True)
-    status = await message.reply_text("⬇️ Downloading source video...")
-
-    try:
-        dl_path = await src_msg.download(file_name=join(save_dir, f"src_{src_msg.id}"))
-        await status.edit_text("🔍 Probing video...")
-        info = await _ffprobe_video(dl_path)
-        if info["duration"] <= 0:
-            raise Exception("Could not determine video duration.")
-
-        avail_langs = sorted({s["lang"] for s in info["audio_streams"]})
-        default_lang = (["multi"] if len(avail_langs) > 1
-                        else (["hin"] if "hin" in avail_langs
-                        else ([avail_langs[0]] if avail_langs else ["multi"])))
-        state = {
-            "user_id":       user_id,
-            "save_dir":      save_dir,
-            "src_path":      dl_path,
-            "duration":      info["duration"],
-            "video_height":  info["video_height"],
-            "audio_streams": info["audio_streams"],
-            "available_langs": avail_langs,
-            "size_mb":       300,
-            "res_key":       "h720",
-            "langs":         default_lang,
-        }
-        compress_jobs[user_id] = state
-        await status.edit_text(_compress_status_text(state), reply_markup=_compress_menu(state))
-    except Exception as e:
-        LOG.error(f"Compress setup failed: {e}")
-        try:
-            await status.edit_text(f"Setup failed: `{e}`")
-        finally:
-            compress_jobs.pop(user_id, None)
-            if save_dir and os.path.exists(save_dir):
-                import shutil
-                shutil.rmtree(save_dir, ignore_errors=True)
-
-
-@app.on_message(filters.command(["Compressadvance", "compressadvance", "cmpadvance", "cmpAdv"]) & AUTH)
-async def compress_advance_cmd(client: Client, message: Message):
-    """
-    /Compressadvance — same as /compress but with smarter defaults:
-      • 576p resolution
-      • 350 MB target size
-      • Multi audio (all tracks kept)
-    Available to all verified users — no owner / premium restriction.
-    No duration limit.
-    """
-    user_id = message.from_user.id
-    if not is_verified(user_id):
-        return await message.reply_text("You must be **verified** to use /Compressadvance. Run /verify.")
-    if user_id in user_tasks or user_id in compress_jobs:
-        return await message.reply_text("You already have an active job. Use /statusme or /cancelme.")
-
-    src_msg, src_media = _get_replied_video(message)
-    if not src_media:
-        return await message.reply_text(
-            "**Reply to a video** with `/Compressadvance`.\n\n"
-            "**Defaults:** 576p · 350 MB · Multi audio (all tracks kept)\n"
-            "Change any option from the menu before pressing **Start**."
-        )
-
-    save_dir = join(DOWNLOAD_DIRECTORY, f"cmpAdv_{int(time.time())}")
-    os.makedirs(save_dir, exist_ok=True)
-    status = await message.reply_text("⬇️ Downloading source video…")
-
-    try:
-        dl_path = await src_msg.download(file_name=join(save_dir, f"src_{src_msg.id}"))
-        await status.edit_text("🔍 Probing video…")
-        info = await _ffprobe_video(dl_path)
-        if info["duration"] <= 0:
-            raise Exception("Could not determine video duration.")
-
-        avail_langs = sorted({s["lang"] for s in info["audio_streams"]})
-        state = {
-            "user_id":        user_id,
-            "save_dir":       save_dir,
-            "src_path":       dl_path,
-            "duration":       info["duration"],
-            "video_height":   info["video_height"],
-            "audio_streams":  info["audio_streams"],
-            "available_langs": avail_langs,
-            # ── Advanced defaults ──────────────────────────
-            "size_mb":  350,       # target ~280-390 MB for typical 50-min 576p content
-            "res_key":  "h576",    # 576p
-            "langs":    ["multi"], # keep all audio tracks
-        }
-        compress_jobs[user_id] = state
-        await status.edit_text(_compress_status_text(state), reply_markup=_compress_menu(state))
-    except Exception as e:
-        LOG.error(f"Compressadvance setup failed uid={user_id}: {e}")
-        try:
-            await status.edit_text(f"Setup failed: `{e}`")
-        finally:
-            compress_jobs.pop(user_id, None)
-            if save_dir and os.path.exists(save_dir):
-                import shutil
-                shutil.rmtree(save_dir, ignore_errors=True)
-
-
-@app.on_callback_query(filters.regex(r"^cmp:"))
-async def cmp_callback(client: Client, cq: CallbackQuery):
-    user_id = cq.from_user.id
-    state   = compress_jobs.get(user_id)
-    if not state:
-        return await cq.answer("This compress session is no longer active.", show_alert=True)
-
-    parts  = cq.data.split(":")
-    action = parts[1] if len(parts) > 1 else ""
-    val    = parts[2] if len(parts) > 2 else ""
-
-    if action == "cancel":
-        compress_jobs.pop(user_id, None)
-        import shutil
-        shutil.rmtree(state["save_dir"], ignore_errors=True)
-        try:
-            await cq.message.edit_text("Compress cancelled.", reply_markup=None)
-        except Exception:
-            pass
-        return await cq.answer("Cancelled.")
-
-    if action == "size":
-        state["size_mb"] = int(val)
-        await cq.answer(f"Target: {val} MB")
-
-    elif action == "res":
-        state["res_key"] = val
-        await cq.answer(f"Resolution: {COMPRESS_RES_CONFIG.get(val, {}).get('label', val)}")
-
-    elif action == "lang":
-        sel = set(state.get("langs", []))
-        if val == "multi":
-            sel = {"multi"} if "multi" not in sel else set()
-        else:
-            sel.discard("multi")
-            if val in sel:
-                sel.discard(val)
-            else:
-                sel.add(val)
-        if not sel:
-            sel = {val}
-        state["langs"] = sorted(sel)
-        await cq.answer(f"Audio: {', '.join(LANG_LABEL.get(l, l) for l in state['langs'])}")
-
-    elif action == "start":
-        if not state.get("size_mb") or not state.get("res_key") or not state.get("langs"):
-            return await cq.answer("Please select size, resolution, and audio first.", show_alert=True)
-        compress_jobs.pop(user_id, None)
-        await cq.answer("Starting compression...")
-        asyncio.create_task(run_compress(client, cq.message, state))
-        return
-
-    try:
-        await cq.message.edit_text(_compress_status_text(state), reply_markup=_compress_menu(state))
-    except Exception:
-        pass
-
-
-# ---------------------------------------------------------------------------
-# /reclink — headless browser stream extractor
-# ---------------------------------------------------------------------------
-
-@app.on_message(filters.command("reclink") & AUTH)
-async def reclink_command(client: Client, message: Message):
-    user_id = message.from_user.id
-    if not is_verified(user_id):
-        return await message.reply_text("You must be **verified** to use /reclink. Run /verify.")
-    if user_id in user_tasks or user_id in reclink_jobs:
-        return await message.reply_text("You already have an active job. Use /statusme or /cancelme.")
-    if len(message.command) < 2:
-        return await message.reply_text(
-            "**Invalid format.**\n\n"
-            "Usage: `/reclink <player_or_webpage_url> HH:MM:SS <filename>`\n"
-            "Example: `/reclink https://embed.example.com/live/abc 00:30:00 MyShow`\n\n"
-            "Use this when the page **runs JavaScript** to load the stream."
-        )
-
-    params    = " ".join(message.command[1:])
-    parts     = params.split(" ", 2)
-    if len(parts) < 2:
-        return await message.reply_text("Bad arguments. Use `/reclink <url> HH:MM:SS <filename>`.")
-    page_url     = parts[0]
-    timestamp    = parts[1]
-    raw_filename = parts[2].strip() if len(parts) > 2 else DEFAULT_FILENAME
-
-    msg = await message.reply_text(
-        "🌐 **Launching headless browser...**\n\n"
-        "Opening the page in Chromium and watching network traffic for "
-        "`.m3u8` / `.mpd` requests. This usually takes 10–30s."
-    )
-
-    log_lines: list  = []
-    last_render      = {"t": 0.0}
-
-    def push_log(line: str):
-        log_lines.append(line)
-        now = time.time()
-        if now - last_render["t"] < 2.5:
-            return
-        last_render["t"] = now
-        tail = "\n".join(log_lines[-8:])
-        try:
-            asyncio.create_task(msg.edit_text(
-                "🌐 **Extracting stream...**\n\n"
-                f"Page: `{page_url[:90]}{'…' if len(page_url) > 90 else ''}`\n\n"
-                f"```\n{tail}\n```"
-            ))
-        except Exception:
-            pass
-
-    async def runner():
-        try:
-            result = await _extract_streams_with_chromium(page_url, timeout_sec=30, log_cb=push_log)
-        except Exception as e:
-            LOG.error(f"reclink extraction failed: {e}")
-            try:
-                await msg.edit_text(
-                    f"**Extraction failed.**\n\n`{e}`\n\n"
-                    "If the page needs login, capture cookies on a real browser and try `/download` instead."
-                )
-            finally:
-                reclink_jobs.pop(user_id, None)
-            return
-
-        streams = result["streams"]
-        if not streams:
-            tail = "\n".join(log_lines[-12:]) or "(no log)"
-            try:
-                await msg.edit_text(
-                    "**No `.m3u8` / `.mpd` streams seen.**\n\n"
-                    f"Page title: `{result.get('page_title', '?')[:80]}`\n"
-                    f"Final URL: `{result.get('final_url', page_url)[:120]}`\n\n"
-                    "Possible reasons:\n"
-                    "• Page needs login → use `/set_cookies` then `/download`.\n"
-                    "• Stream is DRM-protected.\n"
-                    "• Player only starts after a captcha or user gesture.\n\n"
-                    f"```\n{tail}\n```"
-                )
-            finally:
-                reclink_jobs.pop(user_id, None)
-            return
-
-        chosen = streams[0]
-        tail   = "\n".join(log_lines[-6:])
-        try:
-            await msg.edit_text(
-                f"✅ **Captured stream — handing off to recorder.**\n\n"
-                f"Picked: `{'master' if chosen['is_master'] else 'media'} playlist`\n"
-                f"`{chosen['url'][:120]}{'…' if len(chosen['url']) > 120 else ''}`"
-                f"\n\n```\n{tail}\n```"
-            )
-        except Exception:
-            pass
-
-        try:
-            message.command = ["rec", chosen["url"], timestamp, raw_filename]
-            await handle_record(client, message)
-        except Exception as e:
-            LOG.error(f"reclink → handle_record failed: {e}")
-            try:
-                await msg.edit_text(f"Recording start failed: `{e}`")
-            except Exception:
-                pass
-        finally:
-            reclink_jobs.pop(user_id, None)
-
-    task = asyncio.create_task(runner())
-    reclink_jobs[user_id] = {"task": task}
-
-
-# ---------------------------------------------------------------------------
-# /screenshot — evenly-spaced screenshots from a replied video
-# ---------------------------------------------------------------------------
-
-@app.on_message(filters.command(["screenshot", "Screenshot", "ss"]) & AUTH)
-async def screenshot_cmd(client: Client, message: Message):
-    user_id = message.from_user.id
-    if not is_verified(user_id):
-        return await message.reply_text("You must be **verified** to use /screenshot. Run /verify.")
-    if user_id in user_tasks or user_id in ss_jobs:
-        return await message.reply_text("You already have an active job. Use /statusme or /cancelme.")
-
-    src_msg, src_media = _get_replied_video(message)
-    if not src_media:
-        return await message.reply_text(
-            "**Send a video with** `/screenshot` **as the caption**, or reply to a video with `/screenshot`."
-        )
-
-    save_dir = join(DOWNLOAD_DIRECTORY, f"ss_{int(time.time())}")
-    os.makedirs(save_dir, exist_ok=True)
-    status = await message.reply_text("Downloading source video...")
-
-    try:
-        dl_path = await src_msg.download(file_name=join(save_dir, f"src_{src_msg.id}"))
-        await status.edit_text("Probing video...")
-        info = await _ffprobe_video(dl_path)
-        if info["duration"] <= 0:
-            raise Exception("Could not determine video duration.")
-
-        state = {
-            "src_path":    dl_path,
-            "save_dir":    save_dir,
-            "duration":    info["duration"],
-            "video_height": info["video_height"],
-            "user_id":     user_id,
-            "chat_id":     status.chat.id,
-            "status_msg_id": status.id,
-            "username":    message.from_user.username or "anonymous",
-        }
-        ss_jobs[user_id] = state
-        await status.edit_text(_ss_menu_text(state), reply_markup=_ss_menu())
-    except Exception as e:
-        LOG.error(f"screenshot setup failed: {e}")
-        try:
-            await status.edit_text(f"Setup failed: `{e}`")
-        finally:
-            ss_jobs.pop(user_id, None)
-            _safe_rmtree(save_dir)
-
-
-@app.on_callback_query(filters.regex(r"^ss:"))
-async def ss_callback(client: Client, cq: CallbackQuery):
-    user_id = cq.from_user.id
-    state   = ss_jobs.get(user_id)
-    if not state:
-        return await cq.answer("This menu is no longer active.", show_alert=True)
-
-    parts  = cq.data.split(":")
-    action = parts[1] if len(parts) > 1 else ""
-
-    if action == "cancel":
-        ss_jobs.pop(user_id, None)
-        _safe_rmtree(state["save_dir"])
-        try:
-            await cq.message.edit_text("Screenshot cancelled.", reply_markup=None)
-        except Exception:
-            pass
-        return await cq.answer("Cancelled.")
-
-    if action == "n" and len(parts) > 2:
-        try:
-            n = int(parts[2])
-        except ValueError:
-            return await cq.answer("Bad number.", show_alert=True)
-        from logic import SS_MIN, SS_MAX
-        if not (SS_MIN <= n <= SS_MAX):
-            return await cq.answer("Out of range.", show_alert=True)
-        await cq.answer(f"Generating {n} screenshots...")
-        asyncio.create_task(run_screenshots(client, cq.message, state, n))
-        return
-
-    await cq.answer()
-
-
-# ---------------------------------------------------------------------------
-# /trim — cut a portion of a replied video
-# ---------------------------------------------------------------------------
-
-@app.on_message(filters.command("trim") & AUTH)
-async def trim_cmd(client: Client, message: Message):
-    user_id = message.from_user.id
-    if not is_verified(user_id):
-        return await message.reply_text("You must be **verified** to use /trim. Run /verify.")
-    if user_id in user_tasks:
-        return await message.reply_text("You already have an active job. Use /statusme or /cancelme.")
-
-    src_msg, src_media = _get_replied_video(message)
-    if not src_media:
-        return await message.reply_text(
-            "**Send a video with** `/trim <start> <end>` **as the caption**, or reply to a video.\n\n"
-            "Example: `/trim 00:00:30 00:02:00`\nShorthand: `/trim 30s 2m`"
-        )
-
-    if len(message.command) < 3:
-        return await message.reply_text(
-            "**Need a start and end timestamp.**\n\nUsage: `/trim <start> <end>`\n"
-            "Examples:\n• `/trim 00:00:30 00:02:00`\n• `/trim 30s 2m`\n• `/trim 1:30 5:00`"
-        )
-
-    start_tok = message.command[1]
-    end_tok   = message.command[2]
-    start_sec = _parse_duration_token(start_tok)
-    end_sec   = _parse_duration_token(end_tok)
-
-    if end_sec <= 0 or start_sec < 0:
-        return await message.reply_text(
-            f"Bad timestamp(s): `{start_tok}` / `{end_tok}`. "
-            "Use `HH:MM:SS`, `MM:SS`, or shorthand like `30s`, `2m`, `1h`."
-        )
-    if end_sec <= start_sec:
-        return await message.reply_text(
-            f"End (`{_seconds_to_hms(end_sec)}`) must be **after** start (`{_seconds_to_hms(start_sec)}`)."
-        )
-
-    save_dir = join(DOWNLOAD_DIRECTORY, f"trim_{int(time.time())}")
-    os.makedirs(save_dir, exist_ok=True)
-    status = await message.reply_text("Downloading source video...")
-
-    try:
-        dl_path = await src_msg.download(file_name=join(save_dir, f"src_{src_msg.id}"))
-        await status.edit_text("Probing video...")
-        info = await _ffprobe_video(dl_path)
-        if info["duration"] <= 0:
-            raise Exception("Could not determine source video duration.")
-        if start_sec >= info["duration"]:
-            raise Exception(f"Start `{_seconds_to_hms(start_sec)}` is past video end "
-                            f"`{_seconds_to_hms(int(info['duration']))}`.")
-        clip_end = min(end_sec, int(info["duration"]))
-        clip_len = clip_end - start_sec
-        out_path = join(save_dir, f"trim_{int(time.time())}.mkv")
-
-        user_tasks[user_id]  = time.time()
-        user_status[user_id] = {
-            "id": int(user_tasks[user_id]), "user_id": user_id,
-            "filename": os.path.basename(out_path),
-            "duration_str": _seconds_to_hms(clip_len),
-            "channel_name": "Trim", "url": "(local)", "progress": "0%",
-        }
-
-        await status.edit_text(
-            f"✂️ Trimming `{_seconds_to_hms(start_sec)}` → "
-            f"`{_seconds_to_hms(clip_end)}` (`{_seconds_to_hms(clip_len)}` total)..."
-        )
-        cmd = (f'ffmpeg -hide_banner -loglevel error -nostats -y '
-               f'-ss {start_sec} -to {clip_end} '
-               f'-i {shlex.quote(dl_path)} '
-               f'-map 0 -c copy -avoid_negative_ts make_zero {shlex.quote(out_path)}')
-        rc, _o, err = await runcmd(cmd)
-
-        if rc != 0 or not os.path.exists(out_path) or os.path.getsize(out_path) == 0:
-            await status.edit_text("Stream-copy trim failed; falling back to re-encode...")
-            cmd2 = (f'ffmpeg -hide_banner -loglevel error -nostats -y '
-                    f'-ss {start_sec} -to {clip_end} '
-                    f'-i {shlex.quote(dl_path)} '
-                    f'-map 0:v:0 -map 0:a? '
-                    f'-c:v libx264 -preset veryfast -crf 20 -c:a aac -b:a 128k {shlex.quote(out_path)}')
-            rc2, _o2, err2 = await runcmd(cmd2)
-            if rc2 != 0 or not os.path.exists(out_path) or os.path.getsize(out_path) == 0:
-                raise Exception(f"FFmpeg trim failed.\n{(err2 or err)[-1500:]}")
-
-        thumb = join(save_dir, "thumb.jpg")
-        await runcmd(f'ffmpeg -hide_banner -loglevel error -nostats -y '
-                     f'-ss {min(2, max(0, clip_len // 2))} -i {shlex.quote(out_path)} '
-                     f'-vframes 1 -q:v 2 {shlex.quote(thumb)}')
-        thumb_path   = thumb if os.path.exists(thumb) else None
-        out_size_mb  = os.path.getsize(out_path) / (1024 * 1024)
-        retention_note = (f"_The video is automatically deleted from the server after "
-                          f"{_retention_label()}._")
-        caption = (f"🎬 **{BRAND_TITLE}**\n\n"
-                   f"✂️ Trimmed: `{_seconds_to_hms(start_sec)}` → `{_seconds_to_hms(clip_end)}`\n"
-                   f"Duration: `{_seconds_to_hms(clip_len)}`\nSize: `{out_size_mb:.1f} MB`\n"
-                   f"{retention_note}")
-
-        _dest = await _await_upload_choice(user_id, status, f"Trimmed: `{out_size_mb:.1f} MB`")
-        if _dest != "cancel":
-            await _run_upload_destination(
-                client, user_id, _dest, status, out_path, caption, clip_len,
-                thumb_path=thumb_path, save_dir=save_dir,
-            )
-        if save_dir and os.path.exists(save_dir):
-            schedule_retention_cleanup(save_dir)
-
-    except Exception as e:
-        LOG.error(f"Trim failed uid={user_id}: {e}")
-        err_text = str(e)
-        if len(err_text) > 2500: err_text = "...[truncated]...\n" + err_text[-2500:]
-        try: await status.edit_text(f"❌ **Trim failed.**\n\n`{err_text}`")
-        except Exception: pass
-        if save_dir and os.path.exists(save_dir): _safe_rmtree(save_dir)
     finally:
-        user_status.pop(user_id, None)
-        user_tasks.pop(user_id, None)
-        progress_tasks.pop(user_id, None)
-        cancelled_users.discard(user_id)
+        shutil.rmtree(probe_dir, ignore_errors=True)
+    if not streams:
+        await update.message.reply_text("❌ No extractable streams were found in the video.")
+        return
+    pending = {
+        "token": token,
+        "user_id": update.effective_user.id,
+        "chat_id": update.effective_chat.id,
+        "file_id": source["file_id"],
+        "file_name": source["file_name"],
+        "file_size": source["file_size"],
+        "streams": streams,
+        "custom_selected": [],
+        "created_at": time.time(),
+    }
+    STREAM_EXTRACTOR_PENDING[token] = pending
+    context.user_data["stream_extractor_pending"] = pending
+    await update.message.reply_text(
+        _stream_selection_note(),
+        reply_markup=_stream_menu(token, streams),
+        parse_mode=ParseMode.MARKDOWN,
+    )
 
 
-# ---------------------------------------------------------------------------
-# /Watermark — burn text watermark into a replied video (last 2 min)
-# ---------------------------------------------------------------------------
+async def stream_extractor_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    parts = query.data.split(":")
+    if query.data.startswith("stream_extractor_cancel:"):
+        if len(parts) != 2:
+            await query.answer("Invalid extractor request.", show_alert=True, cache_time=0)
+            return
+        token = parts[1]
+        pending = STREAM_EXTRACTOR_PENDING.get(token)
+        if not pending or pending["user_id"] != query.from_user.id:
+            await query.answer("Extractor menu expired.", show_alert=True, cache_time=0)
+            return
+        STREAM_EXTRACTOR_PENDING.pop(token, None)
+        context.user_data.pop("stream_extractor_pending", None)
+        await query.answer("Cancelled.", cache_time=0)
+        await query.edit_message_text("❌ Stream extraction cancelled.")
+        return
+    if len(parts) < 3:
+        await query.answer("Invalid extractor request.", show_alert=True, cache_time=0)
+        return
+    mode, token = parts[1], parts[2]
+    pending = STREAM_EXTRACTOR_PENDING.get(token)
+    if not pending or time.time() - pending.get("created_at", 0) > 15 * 60:
+        STREAM_EXTRACTOR_PENDING.pop(token, None)
+        await query.answer("Extractor menu expired.", show_alert=True, cache_time=0)
+        return
+    if pending["user_id"] != query.from_user.id:
+        await query.answer("❌ This menu belongs to another user.", show_alert=True, cache_time=0)
+        return
+    if mode == "back":
+        await query.answer(cache_time=0)
+        await query.edit_message_text(
+            _stream_selection_note(),
+            reply_markup=_stream_menu(token, pending.get("streams") or []),
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        return
+    if mode == "custom":
+        pending["custom_selected"] = []
+        await query.answer(cache_time=0)
+        await query.edit_message_text(
+            "📦 *Custom Streams*\n\nSelect one or more streams:",
+            reply_markup=_stream_custom_menu(pending),
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        return
+    if mode == "one" and len(parts) == 4:
+        try:
+            selected_index = int(parts[3])
+        except ValueError:
+            await query.answer("Invalid stream.", show_alert=True, cache_time=0)
+            return
+        pending["selected_stream_index"] = selected_index
+        await _start_stream_extraction_from_callback(
+            update, context, query, pending, "one"
+        )
+        return
+    if mode not in {"audio", "subtitle", "all", "custom"}:
+        await query.answer("Invalid stream type.", show_alert=True, cache_time=0)
+        return
+    if mode == "custom":
+        selected = pending.get("custom_selected") or []
+        if not selected:
+            await query.answer(
+                "Select at least one stream first.",
+                show_alert=True,
+                cache_time=0,
+            )
+            return
+    await _start_stream_extraction_from_callback(
+        update, context, query, pending, mode
+    )
 
-def _get_replied_video(message):
-    """Return (src_msg, src_media) for a replied or caption-attached video/document."""
-    # 1) Video attached directly to the command message (sent with command as caption)
-    if message.video:
-        return message, message.video
-    if message.document and (message.document.mime_type or "").startswith("video/"):
-        return message, message.document
-    # 2) Classic reply-to-video flow
-    src = message.reply_to_message
-    if not src:
-        return None, None
-    if src.video:
-        return src, src.video
-    if src.document and (src.document.mime_type or "").startswith("video/"):
-        return src, src.document
+
+async def stream_custom_toggle_callback(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+):
+    query = update.callback_query
+    parts = query.data.split(":")
+    if len(parts) != 3:
+        await query.answer("Invalid stream selection.", show_alert=True, cache_time=0)
+        return
+    token = parts[1]
+    try:
+        index = int(parts[2])
+    except ValueError:
+        await query.answer("Invalid stream selection.", show_alert=True, cache_time=0)
+        return
+    pending = STREAM_EXTRACTOR_PENDING.get(token)
+    if not pending or pending["user_id"] != query.from_user.id:
+        await query.answer("Extractor menu expired.", show_alert=True, cache_time=0)
+        return
+    selected = {int(item) for item in pending.get("custom_selected", [])}
+    if index in selected:
+        selected.remove(index)
+    else:
+        selected.add(index)
+    pending["custom_selected"] = sorted(selected)
+    await query.answer("Updated.", cache_time=0)
+    await query.edit_message_reply_markup(
+        reply_markup=_stream_custom_menu(pending)
+    )
+
+
+async def stream_custom_done_callback(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+):
+    query = update.callback_query
+    parts = query.data.split(":")
+    if len(parts) != 2:
+        await query.answer("Invalid stream selection.", show_alert=True, cache_time=0)
+        return
+    token = parts[1]
+    pending = STREAM_EXTRACTOR_PENDING.get(token)
+    if not pending or pending["user_id"] != query.from_user.id:
+        await query.answer("Extractor menu expired.", show_alert=True, cache_time=0)
+        return
+    if not pending.get("custom_selected"):
+        await query.answer(
+            "Select at least one stream first.",
+            show_alert=True,
+            cache_time=0,
+        )
+        return
+    await _start_stream_extraction_from_callback(
+        update, context, query, pending, "custom"
+    )
+def _build_rec_progress_inline(task_id: str) -> InlineKeyboardMarkup:
+    """Build the requested ⚡ Progress | ❌ Cancel inline keyboard."""
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton("⚡ Progress", callback_data=f"progress:{task_id}"),
+        InlineKeyboardButton("❌ Cancel",   callback_data=f"cancel:{task_id}"),
+    ]])
+
+
+def _build_stream_progress_inline() -> InlineKeyboardMarkup:
+    """StreamExtractor uses the requested bare callback names."""
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton("⚡ Progress", callback_data="progress"),
+        InlineKeyboardButton("❌ Cancel", callback_data="cancel"),
+    ]])
+
+
+def _build_default_audio_progress_inline() -> InlineKeyboardMarkup:
+    """Default-audio updates resolve bare callbacks by message identity."""
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton("⚡ Progress", callback_data="progress"),
+        InlineKeyboardButton("❌ Cancel", callback_data="cancel"),
+    ]])
+
+
+def _stream_task_for_message(query):
+    for task_id, info in RECORDING_PROGRESS_INFO.items():
+        if (
+            info.get("kind") in {"stream_extractor", "default_audio"}
+            and info.get("chat_id") == query.message.chat_id
+            and info.get("message_id") == query.message.message_id
+        ):
+            return task_id, info
     return None, None
 
 
-# ---------------------------------------------------------------------------
-# /Watermark — position picker helpers
-# ---------------------------------------------------------------------------
-
-_WM_POS_LABELS = {
-    "top_left":    "↖️ Top Left",
-    "top_center":  "⬆️ Top Center",
-    "top_right":   "↗️ Top Right",
-    "center":      "🎯 Center",
-    "bottom_left": "↙️ Bottom Left",
-    "bottom_right":"↘️ Bottom Right",
-}
-
-# FFmpeg overlay coords for image watermarks (per position)
-_WM_POS_IMG = {
-    "top_left":    "20:20",
-    "top_center":  "(W-w)/2:20",
-    "top_right":   "W-w-20:20",
-    "center":      "(W-w)/2:(H-h)/2",
-    "bottom_left": "20:H-h-20",
-    "bottom_right":"W-w-20:H-h-20",
-}
-
-# FFmpeg drawtext coords for text watermarks (per position)
-_WM_POS_TXT = {
-    "top_left":    "x=20:y=20",
-    "top_center":  "x=(w-tw)/2:y=20",
-    "top_right":   "x=w-tw-20:y=20",
-    "center":      "x=(w-tw)/2:y=(h-th)/2",
-    "bottom_left": "x=20:y=h-th-20",
-    "bottom_right":"x=w-tw-20:y=h-th-20",
-}
+def _default_audio_name(stream: dict, ordinal: int) -> str:
+    tags = stream.get("tags") or {}
+    _, language_name = _ffmpeg_language(
+        tags.get("language"),
+        tags.get("title") or tags.get("handler_name"),
+    )
+    if language_name == "Und":
+        language_name = str(
+            tags.get("title") or tags.get("handler_name") or f"Audio {ordinal + 1}"
+        ).strip()
+    return language_name or f"Audio {ordinal + 1}"
 
 
-def _wm_pos_keyboard(uid: int, selected: str) -> InlineKeyboardMarkup:
-    """6-position picker + Start / Cancel for /Watermark."""
-    def btn(key: str) -> InlineKeyboardButton:
-        label = ("✅ " if key == selected else "") + _WM_POS_LABELS[key]
-        return InlineKeyboardButton(label, callback_data=f"wmp:{uid}:{key}")
-    return InlineKeyboardMarkup([
-        [btn("top_left"),    btn("top_center"),   btn("top_right")],
-        [btn("center")],
-        [btn("bottom_left"), btn("bottom_right")],
-        [
-            InlineKeyboardButton("▶️ Start",  callback_data=f"wmp:{uid}:start"),
-            InlineKeyboardButton("❌ Cancel", callback_data=f"wmp:{uid}:cancel"),
-        ],
+def _default_audio_button_text(stream: dict, ordinal: int) -> str:
+    language_name = _default_audio_name(stream, ordinal)
+    flags = {
+        "English": "🇬🇧", "Hindi": "🇮🇳", "Tamil": "🇮🇳",
+        "Telugu": "🇮🇳", "Kannada": "🇮🇳", "Malayalam": "🇮🇳",
+        "Marathi": "🇮🇳", "Gujarati": "🇮🇳", "Punjabi": "🇮🇳",
+        "Bengali": "🇮🇳", "Odia": "🇮🇳", "Urdu": "🇮🇳",
+    }
+    default = " (Default)" if (stream.get("disposition") or {}).get("default") else ""
+    return f"{flags.get(language_name, '🎵')} {language_name}{default}"
+
+
+def _default_audio_menu(token: str, streams: list[dict]) -> InlineKeyboardMarkup:
+    buttons = [
+        [InlineKeyboardButton(
+            _default_audio_button_text(stream, ordinal),
+            callback_data=f"default_audio_select:{token}:{ordinal}",
+        )]
+        for ordinal, stream in enumerate(streams)
+    ]
+    buttons.append([
+        InlineKeyboardButton(
+            "❌ Cancel", callback_data=f"default_audio_cancel:{token}"
+        )
     ])
+    return InlineKeyboardMarkup(buttons)
 
 
-@app.on_message(filters.command(["Watermark", "watermark", "wm"]) & AUTH)
-async def watermark_cmd(client: Client, message: Message):
-    user_id = message.from_user.id
-    if not is_verified(user_id):
-        return await message.reply_text("You must be **verified** to use /Watermark. Run /verify.")
-    if user_id in user_tasks:
-        return await message.reply_text("You already have an active job. Use /statusme or /cancelme.")
-
-    src_msg, src_media = _get_replied_video(message)
-    if not src_media:
-        return await message.reply_text(
-            "**Reply to a video** with `/Watermark <text>`.\n\n"
-            "Example: `/Watermark @YourChannelName`\n\n"
-            "⚠️ Watermark will appear in the **last 2 minutes** of the video."
+def _build_default_audio_status_text(
+    filename: str,
+    state: str,
+    audio_name: str = "",
+    pct: float = 0.0,
+    uploaded: int = 0,
+    total: int = 0,
+    speed_mbps: float = 0.0,
+    remaining: float = 0.0,
+) -> str:
+    if state == "scan":
+        return (
+            f"📄 File:\n{filename}\n\n"
+            "🔍 Scanning audio tracks...\n\n"
+            "Please wait..."
         )
-
-    parts   = message.text.split(None, 1)
-    wm_text = (parts[1].strip() if len(parts) > 1 else "") or get_default_watermark()
-
-    # Clear any stale picker session for this user before creating a new one
-    _wm_pos_sessions.pop(user_id, None)
-
-    default_pos = "bottom_right"
-    _wm_pos_sessions[user_id] = {
-        "src_msg": src_msg,
-        "wm_text": wm_text,
-        "pos":     default_pos,
-    }
-
-    await message.reply_text(
-        f"**🎨 Watermark Position**\n\n"
-        f"Text: `{wm_text}`\n\n"
-        f"Watermark kahan lagana chahte hain? Ek position choose karein, phir **Start** dabayein.",
-        reply_markup=_wm_pos_keyboard(user_id, default_pos),
+    if state == "select":
+        return f"📄 File:\n{filename}\n\n🎵 Select Default Audio 👇"
+    if state == "updating":
+        return (
+            "🎬 Changing Default Audio...\n\n"
+            f"📄 File:\n{filename}\n\n"
+            "Status:\nUpdating Audio Flags...\n\n"
+            "⚡ Speed:\nCalculating...\n\n"
+            "⏳ Time Left:\nCalculating..."
+        )
+    if state == "upload":
+        sent_mb = uploaded / 1024 / 1024
+        total_mb = total / 1024 / 1024
+        speed_text = "Calculating..." if not speed_mbps else f"{speed_mbps:.2f} MB/s"
+        return (
+            f"Uploading:\n{filename}\n\n"
+            f"[{_progress_bar(int(pct))}] {pct:.2f}%\n\n"
+            f"Uploaded:\n{sent_mb:.2f} MB / {total_mb:.2f} MB\n\n"
+            f"⚡ Speed:\n{speed_text}\n\n"
+            f"⏳ Time Left:\n{_fmt_time(remaining)}"
+        )
+    return (
+        "✅ Default Audio Updated\n\n"
+        f"📄 File:\n{filename}\n\n"
+        f"🎵 New Default Audio:\n{audio_name}\n\n"
+        "Uploading..."
     )
 
 
-@app.on_callback_query(filters.regex(r"^wmp:(\d+):(top_left|top_center|top_right|center|bottom_left|bottom_right|start|cancel)$"))
-async def wmp_callback(client: Client, cq: CallbackQuery):
-    uid    = int(cq.matches[0].group(1))
-    action = cq.matches[0].group(2)
+def _build_default_audio_popup_text(task_id: str) -> str:
+    info = RECORDING_PROGRESS_INFO.get(task_id)
+    if not info:
+        return "⚠️ Default audio update is no longer active."
+    user = info.get("user_obj")
+    username = (
+        f"@{user.username}" if user and user.username
+        else (user.first_name if user else "Unknown")
+    )
+    filename = str(info.get("filename") or "Unknown")
+    pct = float(info.get("pct") or 0.0)
+    speed = float(info.get("speed_mbps") or 0.0)
+    if info.get("phase") == "upload":
+        uploaded = int(info.get("upload_bytes") or 0)
+        total = int(info.get("upload_size") or 0)
+        remaining = float(info.get("upload_remaining") or 0.0)
+        text = (
+            f"📄 {filename[:28]}\n"
+            f"Progress:\n[{_progress_bar(int(pct))}] {pct:.1f}%\n"
+            f"Uploaded:\n{uploaded / 1024 / 1024:.2f} / {total / 1024 / 1024:.2f} MB\n"
+            f"⚡ {'Calculating...' if not speed else f'{speed:.2f} MB/s'}\n"
+            f"⏳ {_fmt_time(remaining)}\n"
+        )
+    else:
+        text = (
+            f"📄 {filename[:28]}\n"
+            f"Progress:\n[{_progress_bar(int(pct))}] {pct:.2f}%\n"
+            f"Status:\n{str(info.get('status') or '🎬 Updating Audio Flags')[:24]}\n"
+            f"Elapsed:\n{_fmt_time(float(info.get('elapsed') or 0.0))}\n"
+            "Remaining:\nCalculating...\n"
+            f"Speed:\n{'Calculating...' if not speed else f'{speed:.2f} MB/s'}\n"
+        )
+    return (text + f"👤 User:\n{str(username)[:18]}")[:200]
 
-    if cq.from_user.id != uid:
-        return await cq.answer("Yeh aapka session nahi hai.", show_alert=True)
 
-    session = _wm_pos_sessions.get(uid)
-    if not session:
-        await cq.answer("Session expire ho gaya. Dobara /Watermark karein.", show_alert=True)
-        try:
-            await cq.message.delete()
-        except Exception:
-            pass
-        return
+def _build_popup_text(task_id: str) -> str:
+    """Build fresh live details within Telegram's 200-character alert limit."""
+    info = RECORDING_PROGRESS_INFO.get(task_id)
+    if not info:
+        return "⚠️ Recording info not available."
+    filename    = info.get("filename", "Unknown")
+    pct         = info.get("pct", 0.0)
+    elapsed     = info.get("elapsed", 0.0)
+    total       = info.get("total_duration", 0.0)
+    speed       = info.get("speed_mbps", 0.0)
+    channel     = info.get("channel", {})
+    user_obj    = info.get("user_obj")
+    bar         = _progress_bar(int(pct), width=10)
+    recorded    = min(max(0.0, elapsed), total) if total else max(0.0, elapsed)
+    remaining   = max(0.0, total - recorded) if total else 0.0
+    platform    = info.get("platform") or channel.get("channelCategoryId", "Unknown")
+    status      = info.get("status", "🎥 Recording")
+    if user_obj:
+        username = f"@{user_obj.username}" if user_obj.username else user_obj.first_name
+        user_id  = user_obj.id
+    else:
+        username = "Unknown"
+        user_id  = "Unknown"
 
-    if action == "cancel":
-        _wm_pos_sessions.pop(uid, None)
-        await cq.answer("Cancelled.")
-        try:
-            await cq.message.edit_text("❌ Watermark cancelled.")
-        except Exception:
-            pass
-        return
+    # answerCallbackQuery alerts are limited to 200 characters by Telegram.
+    # Keep the latest values, but bound user-controlled strings so a long
+    # filename or username can never make the popup fail.
+    def clip(value, limit):
+        value = str(value)
+        return value if len(value) <= limit else value[:limit - 1] + "…"
 
-    if action != "start":
-        # User tapped a position button — update selection
-        session["pos"] = action
-        await cq.answer(_WM_POS_LABELS[action])
-        try:
-            await cq.message.edit_reply_markup(_wm_pos_keyboard(uid, action))
-        except Exception:
-            pass
-        return
+    speed_text = "Calculating..." if not speed else f"{speed:.2f} MB/s"
+    total_text = _fmt_time(total) if total else "--:--:--"
+    return (
+        f"📄 {clip(filename, 30)}\n"
+        f"📊 [{bar}] {pct:.1f}%\n"
+        f"{clip(status, 22)}\n"
+        f"⏺ {_fmt_time(recorded)} / {total_text}\n"
+        f"⏳ {_fmt_time(remaining)}\n"
+        f"⚡ {speed_text}\n"
+        f"📡 {clip(platform, 14)} | 👤 {clip(username, 18)}\n"
+        f"🆔 {clip(user_id, 12)}"
+    )[:200]
 
-    # ── Start pressed ──────────────────────────────────────────────────────
-    if uid in user_tasks:
-        return await cq.answer("Aapka ek job already chal raha hai. /cancelme use karein.", show_alert=True)
 
-    _wm_pos_sessions.pop(uid, None)
-    src_msg  = session["src_msg"]
-    wm_text  = session["wm_text"]
-    pos      = session["pos"]
-    pos_label= _WM_POS_LABELS.get(pos, pos)
-
-    await cq.answer("Starting…")
+async def _auto_updater(task_id: str, msg, progress_file: str | None,
+                        filename: str, duration_seconds: float,
+                        rec_start: float) -> None:
+    """Auto-update the recording progress message every 5 seconds."""
     try:
-        await cq.message.edit_text(
-            f"⬇️ Downloading video…\n\n"
-            f"Watermark: `{wm_text}`\n"
-            f"Position: {pos_label}"
-        )
-    except Exception:
-        pass
-    status   = cq.message
-    save_dir = join(DOWNLOAD_DIRECTORY, f"wm_{int(time.time())}")
-    os.makedirs(save_dir, exist_ok=True)
-    user_tasks[uid] = True
-    _success = False
-
-    try:
-        dl_path = await src_msg.download(file_name=join(save_dir, f"src_{src_msg.id}"))
-        await status.edit_text(
-            f"🔍 Probing video…\n\nWatermark: `{wm_text}`\nPosition: {pos_label}"
-        )
-        info = await _ffprobe_video(dl_path)
-        dur  = info["duration"]
-        if dur <= 0:
-            raise Exception("Could not determine video duration — ffprobe failed.")
-
-        out_path = join(save_dir, f"wm_output_{int(time.time())}.mkv")
-        wm_start = max(0, dur - 120)
-
-        # Try image watermark first, fallback to text
-        await status.edit_text(
-            f"⬇️ Fetching watermark image…\n\nPosition: {pos_label}"
-        )
-        has_img = await _async_ensure_watermark_img()
-        wm_img  = _watermark_img_path() if has_img else None
-
-        if wm_img:
-            img_pos = _WM_POS_IMG.get(pos, "W-w-20:H-h-20")
-            _wm_sz  = get_watermark_size()
-            fc = (f"[1:v]scale={_wm_sz}:-1[_wm];"
-                  f"[0:v][_wm]overlay={img_pos}"
-                  f":enable='gte(t,{wm_start})'[_out]")
-            await status.edit_text(
-                f"🎨 Burning watermark image…\n\nPosition: {pos_label}\n_This may take a moment._"
+        while True:
+            await asyncio.sleep(5)
+            info = RECORDING_PROGRESS_INFO.get(task_id)
+            if not info or not info.get("running", True):
+                break
+            current_progress_file = info.get("progress_file") or progress_file
+            pg          = _read_ffmpeg_progress(current_progress_file) if current_progress_file else {}
+            wall_elapsed = time.time() - rec_start
+            out_us      = _progress_int(pg.get("out_time_us"), 0)
+            current_duration = float(info.get("total_duration") or duration_seconds or 0.0)
+            source_path = info.get("source_path")
+            source_size = _progress_int(info.get("source_size"), 0)
+            source_bytes = (
+                os.path.getsize(source_path)
+                if source_path and os.path.exists(source_path)
+                else 0
             )
-            rc, _out, err = await runcmd(
-                f'ffmpeg -hide_banner -loglevel error -nostats -y '
-                f'-i {shlex.quote(dl_path)} '
-                f'-i {shlex.quote(wm_img)} '
-                f'-filter_complex {shlex.quote(fc)} '
-                f'-map [_out] -map 0:a? '
-                f'-c:v libx264 -preset veryfast -crf 20 '
-                f'-c:a copy '
-                f'{shlex.quote(out_path)}'
+            media_elapsed = out_us / 1_000_000 if out_us > 0 else 0.0
+            if current_duration:
+                media_elapsed = min(media_elapsed, current_duration)
+            pct         = (
+                min(99.0, media_elapsed / max(current_duration, 1) * 100)
+                if current_duration else
+                min(99.0, source_bytes / source_size * 100)
+                if source_size else 0.0
             )
-            wm_label = f"Image · {pos_label} · last 2 min"
-        else:
-            safe_txt  = wm_text.replace("\\", "\\\\").replace("'", "\\'").replace(":", "\\:")
-            xy        = _WM_POS_TXT.get(pos, "x=w-tw-20:y=h-th-20")
-            vf_filter = (
-                f"drawtext=text='{safe_txt}':fontsize=28:fontcolor=white"
-                f":box=1:boxcolor=black@0.4:boxborderw=4"
-                f":{xy}:enable='gte(t,{wm_start})'"
+            total_bytes = _progress_int(pg.get("total_size"), 0)
+            if not total_bytes:
+                total_bytes = source_bytes
+            speed_mbps  = (
+                (total_bytes / 1024 / 1024) / max(wall_elapsed, 1)
+                if total_bytes else info.get("speed_mbps", 0.0)
             )
-            await status.edit_text(
-                f"🎨 Burning watermark `{wm_text}`…\n\nPosition: {pos_label}\n_This may take a moment._"
-            )
-            rc, _out, err = await runcmd(
-                f'ffmpeg -hide_banner -loglevel error -nostats -y '
-                f'-i {shlex.quote(dl_path)} '
-                f'-map 0:v:0 -map 0:a? '
-                f'-vf {shlex.quote(vf_filter)} '
-                f'-c:v libx264 -preset veryfast -crf 20 '
-                f'-c:a copy '
-                f'{shlex.quote(out_path)}'
-            )
-            wm_label = f"`{wm_text}` · {pos_label} · last 2 min"
-
-        if rc != 0:
-            raise Exception(f"FFmpeg watermark failed:\n{err.strip()[-1500:]}")
-
-        out_mb  = os.path.getsize(out_path) / (1024 * 1024)
-        thumb   = join(save_dir, "thumb.jpg")
-        await runcmd(
-            f'ffmpeg -hide_banner -loglevel error -nostats -y '
-            f'-ss {min(int(dur)-5, max(0, int(dur)-10))} '
-            f'-i {shlex.quote(out_path)} '
-            f'-vframes 1 -q:v 2 {shlex.quote(thumb)}'
-        )
-        thumb_ok = os.path.exists(thumb)
-
-        caption = (
-            f"🎨 **Watermark Applied**\n\n"
-            f"Watermark: {wm_label}\n"
-            f"Size: `{out_mb:.1f} MB` | Duration: `{_seconds_to_hms(int(dur))}`\n"
-            f"_Auto-deleted from server after {_retention_label()}._"
-        )
-        _dest = await _await_upload_choice(uid, status, f"Watermarked: `{out_mb:.1f} MB`")
-        if _dest != "cancel":
-            await _run_upload_destination(
-                client, uid, _dest, status, out_path, caption, dur,
-                thumb_path=(thumb if thumb_ok else None), save_dir=save_dir,
-            )
-        _success = True
-
-    except Exception as e:
-        LOG.error(f"Watermark failed uid={uid}: {e}")
-        err_text = str(e)
-        if len(err_text) > 2500:
-            err_text = "...[truncated]...\n" + err_text[-2500:]
-        try:
-            await status.edit_text(f"❌ **Watermark failed.**\n\n`{err_text}`")
-        except Exception:
-            pass
-    finally:
-        user_tasks.pop(uid, None)
-        if save_dir and os.path.exists(save_dir):
-            if _success:
-                schedule_retention_cleanup(save_dir)
+            # Update shared info so the popup always has fresh values
+            info["pct"]        = pct
+            info["elapsed"]    = media_elapsed
+            info["speed_mbps"] = speed_mbps
+            info["process"]    = RECORDING_SESSION_PROC.get(task_id)
+            if (
+                info.get("phase") == "upload"
+                and info.get("kind") in {
+                    "merge", "media", "stream_extractor", "default_audio"
+                }
+            ):
+                upload_total = int(info.get("upload_size") or 0)
+                upload_sent = int(info.get("upload_bytes") or 0)
+                upload_started = float(info.get("upload_start") or rec_start)
+                upload_elapsed = max(0.1, time.time() - upload_started)
+                upload_pct = (
+                    min(99.9, upload_sent / upload_total * 100)
+                    if upload_total else 0.0
+                )
+                upload_speed = upload_sent / 1024 / 1024 / upload_elapsed
+                info["pct"] = upload_pct
+                info["elapsed"] = upload_elapsed
+                info["speed_mbps"] = upload_speed
+                remaining = int(
+                    max(0, (upload_total - upload_sent) / 1024 / 1024 / upload_speed)
+                ) if upload_speed > 0 and upload_total else 0
+                text = _build_upload_status_text(
+                    info.get("filename") or filename, upload_pct, upload_sent, upload_total,
+                    upload_speed, remaining,
+                )
+                if info.get("kind") == "default_audio":
+                    info["upload_remaining"] = remaining
+                    text = _build_default_audio_status_text(
+                        info.get("filename") or filename,
+                        "upload",
+                        info.get("audio_name", ""),
+                        upload_pct,
+                        upload_sent,
+                        upload_total,
+                        upload_speed,
+                        remaining,
+                    )
+            elif info.get("kind") == "stream_extractor":
+                item_duration = float(
+                    info.get("current_item_duration")
+                    or info.get("total_duration")
+                    or duration_seconds
+                    or 0.0
+                )
+                item_pct = (
+                    min(99.9, media_elapsed / max(item_duration, 1) * 100)
+                    if item_duration else 0.0
+                )
+                completed = int(info.get("completed_items") or 0)
+                item_count = max(1, int(info.get("item_count") or 1))
+                pct = min(99.9, ((completed + item_pct / 100) / item_count) * 100)
+                info["pct"] = pct
+                info["elapsed"] = media_elapsed
+                info["total_duration"] = item_duration
+                text = _build_stream_status_text(
+                    info.get("filename") or filename,
+                    pct,
+                    speed_mbps,
+                    info.get("status", "🎬 Extracting"),
+                    wall_elapsed,
+                    max(0.0, item_duration - media_elapsed),
+                )
+            elif info.get("kind") == "merge":
+                text = _build_merge_status_text(
+                    filename, pct, speed_mbps, info.get("status", "🎬 Merging")
+                )
+            elif info.get("kind") == "media":
+                text = _build_media_status_text(
+                    filename, pct, speed_mbps, info.get("status", "Processing...")
+                )
+            elif info.get("kind") == "default_audio":
+                text = _build_default_audio_status_text(
+                    filename,
+                    "updating",
+                    info.get("audio_name", ""),
+                    pct,
+                    speed_mbps=speed_mbps,
+                )
             else:
-                _safe_rmtree(save_dir)
-
-
-# ---------------------------------------------------------------------------
-# /audiotrack — inject audio metadata lock without re-encoding (instant)
-# ---------------------------------------------------------------------------
-
-@app.on_message(filters.command(["audiotrack", "AudioTrack", "at"]) & AUTH)
-async def audiotrack_cmd(client: Client, message: Message):
-    user_id = message.from_user.id
-    if not is_verified(user_id):
-        return await message.reply_text("You must be **verified** to use /audiotrack. Run /verify.")
-    if user_id in user_tasks:
-        return await message.reply_text("You already have an active job. Use /statusme or /cancelme.")
-
-    src_msg, src_media = _get_replied_video(message)
-    if not src_media:
-        return await message.reply_text(
-            "**Reply to a video** with `/audiotrack <name>`.\n\n"
-            "Example: `/audiotrack @YourChannelName`\n\n"
-            "✅ No re-encoding — runs in 2-3 seconds even on large files.\n"
-            "🔒 Wipes global metadata, injects your brand into all audio tracks."
-        )
-
-    parts    = message.text.split(None, 1)
-    at_name  = parts[1].strip() if len(parts) > 1 else get_audio_brand_name()
-    if not at_name:
-        at_name = get_audio_brand_name()
-
-    save_dir = join(DOWNLOAD_DIRECTORY, f"at_{int(time.time())}")
-    os.makedirs(save_dir, exist_ok=True)
-    status   = await message.reply_text("⬇️ Downloading video…")
-    user_tasks[user_id] = True
-
-    try:
-        dl_path  = await src_msg.download(file_name=join(save_dir, f"src_{src_msg.id}"))
-        out_path = join(save_dir, f"locked_{int(time.time())}.mkv")
-
-        await status.edit_text(
-            f"🔒 Locking audio track metadata…\n"
-            f"Name: `{at_name}`\n"
-            f"_No re-encode — this will finish in seconds._"
-        )
-
-        # Build metadata args for 3 audio tracks
-        meta_args = []
-        for i in range(3):
-            meta_args += [
-                f"-metadata:s:a:{i}", f"title={at_name}",
-                f"-metadata:s:a:{i}", f"handler_name={at_name}",
-            ]
-        meta_str = " ".join(shlex.quote(a) for a in meta_args)
-
-        rc, _out, err = await runcmd(
-            f'ffmpeg -hide_banner -loglevel error -nostats -y '
-            f'-i {shlex.quote(dl_path)} '
-            f'-map 0 -c copy '
-            f'-map_metadata -1 '          # wipe global metadata block
-            f'{meta_str} '               # inject stream-level audio brand
-            f'{shlex.quote(out_path)}'
-        )
-        if rc != 0:
-            raise Exception(f"FFmpeg audiotrack failed:\n{err.strip()[-1500:]}")
-
-        out_mb   = os.path.getsize(out_path) / (1024 * 1024)
-        info     = await _ffprobe_video(out_path)
-        dur      = info["duration"]
-        # Generate thumb
-        thumb    = join(save_dir, "thumb.jpg")
-        await runcmd(
-            f'ffmpeg -hide_banner -loglevel error -nostats -y '
-            f'-ss {max(0, int(dur) // 2)} '
-            f'-i {shlex.quote(out_path)} '
-            f'-vframes 1 -q:v 2 {shlex.quote(thumb)}'
-        )
-        thumb_ok = os.path.exists(thumb)
-
-        caption = (
-            f"🔒 **Audio Track Locked**\n\n"
-            f"Brand: `{at_name}`\n"
-            f"Tracks locked: Audio 0, 1, 2\n"
-            f"Global metadata: ❌ Wiped\n"
-            f"Re-encoded: ❌ (stream copy)\n"
-            f"Size: `{out_mb:.1f} MB`\n"
-            f"_Visible in VLC → Track Info, MX Player, Telegram audio selector._\n"
-            f"_Auto-deleted from server after {_retention_label()}._"
-        )
-        _dest = await _await_upload_choice(user_id, status, f"Audio locked: `{out_mb:.1f} MB`")
-        if _dest != "cancel":
-            await _run_upload_destination(
-                client, user_id, _dest, status, out_path, caption, dur,
-                thumb_path=(thumb if thumb_ok else None), save_dir=save_dir,
+                text = _build_rec_status_text(
+                    filename, pct, speed_mbps, info.get("status", "Recording...")
+                )
+            keyboard = (
+                _build_default_audio_progress_inline()
+                if info.get("kind") == "default_audio"
+                else
+                _build_stream_progress_inline()
+                if info.get("kind") == "stream_extractor"
+                else _build_rec_progress_inline(task_id)
             )
-        if save_dir and os.path.exists(save_dir):
-            schedule_retention_cleanup(save_dir)
-
-    except Exception as e:
-        LOG.error(f"Audiotrack cmd failed uid={user_id}: {e}")
-        err_text = str(e)
-        if len(err_text) > 2500:
-            err_text = "...[truncated]...\n" + err_text[-2500:]
-        try:
-            await status.edit_text(f"**Audio track lock failed.**\n\n`{err_text}`")
-        except Exception:
-            pass
-        if save_dir and os.path.exists(save_dir):
-            _safe_rmtree(save_dir)
-    finally:
-        user_tasks.pop(user_id, None)
-
-
-# ---------------------------------------------------------------------------
-# /16x9 — scale+crop any replied video to 1280×720 (16:9)
-# ---------------------------------------------------------------------------
-
-@app.on_message(filters.command(["16x9", "169", "crop169", "16by9"]) & AUTH)
-async def cmd_16x9(client: Client, message: Message):
-    user_id = message.from_user.id
-    if not is_verified(user_id):
-        return await message.reply_text("You must be **verified** to use /16x9. Run /verify.")
-    if user_id in user_tasks:
-        return await message.reply_text("You already have an active job. Use /statusme or /cancelme.")
-
-    src_msg, src_media = _get_replied_video(message)
-    if not src_media:
-        return await message.reply_text(
-            "**Reply to a video** with `/16x9` to convert it to **1280×720 16:9** format.\n\n"
-            "What it does:\n"
-            "• Scale to fill 1280×720 (no black bars)\n"
-            "• Crop to exact 16:9 (center crop)\n"
-            "• Re-encode: H.264 CRF 20, AAC audio copy"
-        )
-
-    save_dir   = join(DOWNLOAD_DIRECTORY, f"169_{int(time.time())}")
-    os.makedirs(save_dir, exist_ok=True)
-    status     = await message.reply_text("⬇️ Downloading video…")
-    user_tasks[user_id] = time.time()
-
-    try:
-        dl_path  = await src_msg.download(file_name=join(save_dir, f"src_{src_msg.id}"))
-        out_path = join(save_dir, f"16x9_{int(time.time())}.mp4")
-
-        await status.edit_text("🔲 **Converting to 16:9 (1280×720)…**\n\n⚙️ Starting…")
-
-        task_id = f"{user_id % 10000:04d}{int(time.time()) % 100000}"
-        ffmpeg_jobs[task_id] = {
-            "uid":          user_id,
-            "chat_id":      message.chat.id,
-            "status_msg":   status,
-            "output_file":  out_path,
-            "save_dir":     save_dir,
-            "duration":     0.0,
-            "done":         False,
-            "cancelled":    False,
-            "proc":         None,
-            "cur_time_sec": 0.0,
-            "cur_size_kb":  0,
-        }
-
-        # Get source duration for progress bar
-        info = await _ffprobe_video(dl_path)
-        ffmpeg_jobs[task_id]["duration"] = info.get("duration", 0)
-
-        await status.edit_text(
-            f"🔲 **16:9 Crop Running...**\n\n"
-            f"[{'░' * 10}] 0%\n\n"
-            f"⏱️ Time : `00:00:00` / `{_ff_sec_to_hms(info.get('duration', 0))}`\n"
-            f"📦 Size : `—`\n"
-            f"🆔 Task : `{task_id}`",
-            reply_markup=_ffmpeg_running_kb(task_id),
-        )
-
-        crop_args = (
-            f'-i {shlex.quote(dl_path)} '
-            f'-vf "scale=1280:720:force_original_aspect_ratio=increase,crop=1280:720" '
-            f'-c:v libx264 -preset medium -crf 20 '
-            f'-c:a copy -movflags +faststart '
-            f'{shlex.quote(out_path)}'
-        )
-        await _run_ffmpeg_task(client, crop_args, task_id)
-
-    except Exception as e:
-        LOG.error(f"/16x9 failed uid={user_id}: {e}")
-        try:
-            await status.edit_text(f"❌ **16:9 crop failed.**\n\n`{e}`")
-        except Exception:
-            pass
-        if save_dir and os.path.exists(save_dir):
-            _safe_rmtree(save_dir)
-    finally:
-        user_tasks.pop(user_id, None)
-
-
-# ---------------------------------------------------------------------------
-# /merge — collect videos then concatenate them
-# ---------------------------------------------------------------------------
-
-@app.on_message(filters.command("merge") & AUTH)
-async def merge_cmd(client: Client, message: Message):
-    user_id = message.from_user.id
-    if not is_verified(user_id):
-        return await message.reply_text("You must be **verified** to use /merge. Run /verify.")
-    if user_id in user_tasks:
-        return await message.reply_text("You already have an active job. Use /statusme or /cancelme.")
-    if user_id in merge_sessions:
-        return await message.reply_text(_merge_session_status(merge_sessions[user_id]))
-
-    save_dir = join(DOWNLOAD_DIRECTORY, f"merge_{int(time.time())}")
-    os.makedirs(save_dir, exist_ok=True)
-    sess = {"save_dir": save_dir, "videos": [], "started_at": time.time(), "chat_id": message.chat.id}
-    merge_sessions[user_id] = sess
-    msg = await message.reply_text(
-        f"🧩 **Merge session started.**\n\n"
-        f"Send me **2 to {MERGE_MAX_VIDEOS} videos** one by one in the order you want them joined. "
-        "After the last one, send `/merge_done`.\n\nCancel any time with `/merge_cancel`.\n"
-        "Session expires in 30 min if you stop sending."
-    )
-    sess["status_msg_id"] = msg.id
-
-
-@app.on_message(filters.command("merge_cancel") & AUTH)
-async def merge_cancel_cmd(client: Client, message: Message):
-    user_id = message.from_user.id
-    sess    = merge_sessions.pop(user_id, None)
-    if not sess:
-        return await message.reply_text("No active merge session.")
-    _safe_rmtree(sess["save_dir"])
-    await message.reply_text("🧩 Merge session cancelled — collected videos discarded.")
-
-
-@app.on_message(filters.command("merge_done") & AUTH)
-async def merge_done_cmd(client: Client, message: Message):
-    user_id = message.from_user.id
-    sess    = merge_sessions.get(user_id)
-    if not sess:
-        return await message.reply_text("No active merge session. Start one with /merge.")
-    if len(sess["videos"]) < 2:
-        return await message.reply_text(
-            f"Need at least **2 videos**. You have `{len(sess['videos'])}`. "
-            "Send more, or /merge_cancel."
-        )
-    if user_id in user_tasks:
-        return await message.reply_text("You already have an active job — finish or /cancelme first.")
-    asyncio.create_task(run_merge(client, message, sess))
-
-
-@app.on_message((filters.private | filters.group) & (filters.video | filters.document) & AUTH, group=1)
-async def merge_video_collector(client: Client, message: Message):
-    user_id = message.from_user.id
-    if user_id in pending_cookies_users:
-        return
-    sess = merge_sessions.get(user_id)
-    if not sess:
-        return
-
-    if time.time() - sess["started_at"] > MERGE_SESSION_TTL:
-        merge_sessions.pop(user_id, None)
-        _safe_rmtree(sess["save_dir"])
-        return await message.reply_text("🧩 Merge session expired (30 min idle). Start again with /merge.")
-
-    src = None
-    if message.video:
-        src = message.video
-    elif message.document and (message.document.mime_type or "").startswith("video/"):
-        src = message.document
-    if not src:
-        return
-
-    if len(sess["videos"]) >= MERGE_MAX_VIDEOS:
-        return await message.reply_text(
-            f"🧩 Already at the max of `{MERGE_MAX_VIDEOS}` videos. Send /merge_done to merge."
-        )
-
-    idx = len(sess["videos"]) + 1
-    ack = await message.reply_text(f"⬇️ Downloading video #{idx}...")
-    try:
-        path   = await message.download(file_name=join(sess["save_dir"], f"part_{idx:02d}"))
-        info   = await _ffprobe_video(path)
-        codec_v, codec_a, width = "?", "?", 0
-        try:
-            probe2 = await runcmd(f'ffprobe -v error -hide_banner -print_format json '
-                                  f'-show_streams {shlex.quote(path)}')
-            data = json.loads(probe2[1] or "{}")
-            for s in data.get("streams", []):
-                if s.get("codec_type") == "video" and codec_v == "?":
-                    codec_v = s.get("codec_name", "?")
-                    width   = int(s.get("width") or 0)
-                elif s.get("codec_type") == "audio" and codec_a == "?":
-                    codec_a = s.get("codec_name", "?")
-        except Exception:
-            pass
-
-        sess["videos"].append({"path": path, "duration": info["duration"],
-                               "height": info["video_height"], "width": width,
-                               "codec_v": codec_v, "codec_a": codec_a,
-                               "audio_streams": info["audio_streams"]})
-        sess["started_at"] = time.time()
-        await ack.edit_text(_merge_session_status(sess))
-    except Exception as e:
-        LOG.error(f"merge collector failed: {e}")
-        try: await ack.edit_text(f"Failed to add video: `{e}`")
-        except Exception: pass
-
-
-# ---------------------------------------------------------------------------
-# /title — burn text overlay onto a replied video
-# ---------------------------------------------------------------------------
-
-@app.on_message(filters.command("title") & AUTH)
-async def title_cmd(client: Client, message: Message):
-    user_id = message.from_user.id
-
-    if not is_verified(user_id):
-        return await message.reply_text(
-            "You must be **verified** to use /title. Run /verify first."
-        )
-    if user_id in user_tasks:
-        return await message.reply_text(
-            "You already have an active job. Wait for it to finish or /cancelme."
-        )
-    if user_id in title_jobs:
-        return await message.reply_text(
-            "You already have a pending title job. Use the buttons or /cancel_title."
-        )
-
-    if len(message.command) < 2:
-        return await message.reply_text(
-            "**Usage:** `/title <your text>` _(reply to a video)_\n\n"
-            "Example: `/title Dragon Ball Super — Episode 1`\n\n"
-            "• Title is burned into the video with FFmpeg.\n"
-            "• Videos **> 46 minutes**: title disappears in the last 3 minutes."
-        )
-
-    title_text = " ".join(message.command[1:]).strip()
-    if len(title_text) > 100:
-        return await message.reply_text("Title too long (max 100 characters).")
-
-    # Must reply to a video
-    src_msg = message.reply_to_message
-    src_media = None
-    if src_msg:
-        if src_msg.video:
-            src_media = src_msg.video
-        elif src_msg.document and (src_msg.document.mime_type or "").startswith("video/"):
-            src_media = src_msg.document
-
-    if not src_media:
-        return await message.reply_text(
-            "Please **reply to a video** with `/title <your text>`."
-        )
-
-    status = await message.reply_text("⬇️ Downloading video for title overlay…")
-
-    save_dir = join(DOWNLOAD_DIRECTORY, f"title_{user_id}_{int(time.time())}")
-    os.makedirs(save_dir, exist_ok=True)
-
-    try:
-        dl_path = await src_msg.download(file_name=join(save_dir, "source"))
-        info    = await _ffprobe_video(dl_path)
-        dur     = info["duration"]
-        height  = info["video_height"]
-    except Exception as e:
-        _safe_rmtree(save_dir)
-        return await status.edit_text(f"❌ Download / probe failed: `{e}`")
-
-    state = {
-        "user_id":      user_id,
-        "src_path":     dl_path,
-        "save_dir":     save_dir,
-        "duration":     dur,
-        "video_height": height,
-        "title_text":   title_text,
-        "status_msg":   status,
-    }
-    title_jobs[user_id] = state
-
-    try:
-        await status.edit_text(_title_menu_text(state), reply_markup=_title_kb(user_id))
-    except Exception:
-        pass
-
-
-@app.on_message(filters.command("cancel_title") & AUTH)
-async def cancel_title_cmd(_, message: Message):
-    user_id = message.from_user.id
-    state   = title_jobs.pop(user_id, None)
-    if state:
-        _safe_rmtree(state.get("save_dir", ""))
-    await message.reply_text("Title job cancelled." if state else "No pending title job.")
-
-
-@app.on_callback_query(filters.regex(r"^ti:(\d+):(pos|cancel):?(\w*)$"))
-async def title_cb(client: Client, cq: CallbackQuery):
-    parts  = cq.data.split(":")
-    uid    = int(parts[1])
-    action = parts[2]
-    val    = parts[3] if len(parts) > 3 else ""
-
-    if cq.from_user.id != uid:
-        return await cq.answer("Not your job.", show_alert=True)
-
-    state = title_jobs.get(uid)
-    if not state:
-        await cq.answer("Session expired.", show_alert=True)
-        try: await cq.message.edit_reply_markup(None)
-        except Exception: pass
-        return
-
-    if action == "cancel":
-        title_jobs.pop(uid, None)
-        _safe_rmtree(state.get("save_dir", ""))
-        await cq.answer("Cancelled.")
-        try: await cq.message.edit_text("Title overlay cancelled.", reply_markup=None)
-        except Exception: pass
-        return
-
-    if action == "pos":
-        if val not in TITLE_POS_MAP:
-            return await cq.answer("Unknown position.", show_alert=True)
-        await cq.answer(f"Position: {TITLE_POS_MAP[val][0]}")
-        title_jobs.pop(uid, None)
-        asyncio.create_task(run_title(client, cq.message, state, val))
-
-
-# ---------------------------------------------------------------------------
-# /start inline button helpers
-# ---------------------------------------------------------------------------
-
-@app.on_callback_query(filters.regex(r"^show_help$"))
-async def cb_show_help(_, cq: CallbackQuery):
-    await cq.message.reply_text(HELP_TEXT, disable_web_page_preview=True)
-    await cq.answer()
-
-
-@app.on_callback_query(filters.regex(r"^show_plans$"))
-async def cb_show_plans(_, cq: CallbackQuery):
-    await cq.message.reply_text(render_plans_text(), disable_web_page_preview=True)
-    await cq.answer()
-
-
-@app.on_callback_query(filters.regex(r"^show_channels$"))
-async def cb_show_channels(_, cq: CallbackQuery):
-    await cq.message.reply_text("**Browse channels**\n\nPick a channel:", reply_markup=_channel_root_kb())
-    await cq.answer()
-
-
-@app.on_callback_query(filters.regex(r"^show_verify$"))
-async def cb_show_verify(client: Client, cq: CallbackQuery):
-    msg = cq.message
-    msg.from_user = cq.from_user
-    msg.command   = ["verify"]
-    await verify_cmd(client, msg)
-    await cq.answer()
-
-
-@app.on_callback_query(filters.regex(r"^noop$"))
-async def cb_noop(_, cq: CallbackQuery):
-    await cq.answer()
-
-
-# ---------------------------------------------------------------------------
-# /stats — owner/admin bot statistics dashboard
-# ---------------------------------------------------------------------------
-
-def _dir_size_mb(path: str) -> float:
-    """Return total size of a directory tree in MB."""
-    total = 0
-    try:
-        for root, _dirs, files in os.walk(path):
-            for f in files:
-                try:
-                    total += os.path.getsize(os.path.join(root, f))
-                except OSError:
-                    pass
-    except Exception:
-        pass
-    return total / (1024 * 1024)
-
-
-@app.on_message(filters.command(["stats", "Stats"]) & AUTH)
-async def stats_cmd(_client: Client, message: Message):
-    uid = message.from_user.id
-    if not (is_owner(uid) or is_admin(uid)):
-        return await message.reply_text("❌ Only owner/admin can use /stats.")
-
-    # ── Users ──────────────────────────────────────────────────────────────
-    verified_data   = load_verified()
-    total_verified  = len(verified_data)
-    total_admins    = len(load_admins())
-
-    # ── Active jobs ────────────────────────────────────────────────────────
-    active_rec_count   = sum(len(v) for v in active_recs.values())
-    active_compress    = len(compress_jobs)
-    active_ss          = len(ss_jobs)
-    active_merge       = len(merge_sessions)
-    active_misc        = len([u for u in user_tasks
-                               if u not in compress_jobs
-                               and u not in ss_jobs
-                               and u not in merge_sessions
-                               and u not in active_recs])
-
-    # ── Disk ───────────────────────────────────────────────────────────────
-    dl_mb   = _dir_size_mb(DOWNLOAD_DIRECTORY)
-    data_mb = _dir_size_mb(DATA_DIRECTORY)
-
-    # ── Uptime ─────────────────────────────────────────────────────────────
-    up_sec   = int(time.time() - _BOT_START_TIME)
-    up_h, r  = divmod(up_sec, 3600)
-    up_m, up_s = divmod(r, 60)
-    uptime   = f"{up_h}h {up_m}m {up_s}s"
-
-    # ── Relay ──────────────────────────────────────────────────────────────
-    relay_state = "✅ ON" if relay_enabled else "❌ OFF"
-
-    # ── Group ──────────────────────────────────────────────────────────────
-    group_info = f"`{GROUP_CHAT_ID}`" if GROUP_CHAT_ID else "not set (open)"
-
-    text = (
-        f"📊 **Bot Statistics**\n"
-        f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-        f"👥 **Users**\n"
-        f"  Verified : `{total_verified}`\n"
-        f"  Admins   : `{total_admins}`\n\n"
-        f"⚙️ **Active Jobs**\n"
-        f"  Recordings  : `{active_rec_count}`\n"
-        f"  Compress    : `{active_compress}`\n"
-        f"  Screenshot  : `{active_ss}`\n"
-        f"  Merge       : `{active_merge}`\n"
-        f"  Other jobs  : `{active_misc}`\n\n"
-        f"💾 **Disk Usage**\n"
-        f"  Downloads : `{dl_mb:.1f} MB`\n"
-        f"  Data      : `{data_mb:.1f} MB`\n\n"
-        f"📡 **DM Relay** : {relay_state}  "
-        f"(blocked: `{len(relay_blocked)}`)\n"
-        f"📌 **Group ID** : {group_info}\n\n"
-        f"⏱ **Uptime** : `{uptime}`\n"
-        f"━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    )
-    await message.reply_text(text)
-
-
-# ---------------------------------------------------------------------------
-# /broadcast — send a message to all verified users (owner/admin only)
-# ---------------------------------------------------------------------------
-
-_broadcast_running: bool = False
-
-
-@app.on_message(filters.command(["broadcast", "Broadcast", "bc"]) & AUTH)
-async def broadcast_cmd(client: Client, message: Message):
-    global _broadcast_running
-    uid = message.from_user.id
-    if not (is_owner(uid) or is_admin(uid)):
-        return await message.reply_text("❌ Only owner/admin can use /broadcast.")
-
-    if _broadcast_running:
-        return await message.reply_text("⏳ A broadcast is already in progress. Wait for it to finish.")
-
-    text_parts = message.command
-    if len(text_parts) < 2:
-        return await message.reply_text(
-            "**Usage:** `/broadcast <your message>`\n\n"
-            "Sends the message to all **verified users**.\n"
-            "Example: `/broadcast Bot updated! New features added.`"
-        )
-
-    bc_text = " ".join(text_parts[1:])
-    verified_data = load_verified()
-    user_ids = list(verified_data.keys())
-
-    if not user_ids:
-        return await message.reply_text("No verified users to broadcast to.")
-
-    _broadcast_running = True
-    status = await message.reply_text(
-        f"📢 **Broadcasting** to `{len(user_ids)}` verified users…\n_This may take a moment._"
-    )
-
-    sent = 0
-    failed = 0
-    blocked = 0
-
-    for i, user_id_str in enumerate(user_ids, 1):
-        try:
-            target_id = int(user_id_str)
-            if is_owner(target_id) or is_admin(target_id):
-                continue  # skip staff
-            await client.send_message(target_id, bc_text)
-            sent += 1
-        except Exception as e:
-            err = str(e).lower()
-            if "blocked" in err or "forbidden" in err or "user is deactivated" in err:
-                blocked += 1
-            else:
-                failed += 1
-
-        # Update progress every 20 users
-        if i % 20 == 0 or i == len(user_ids):
             try:
-                await status.edit_text(
-                    f"📢 **Broadcasting…** `{i}` / `{len(user_ids)}`\n"
-                    f"✅ Sent: `{sent}`  ❌ Failed: `{failed}`  🚫 Blocked: `{blocked}`"
+                await msg.edit_text(
+                    text,
+                    parse_mode=None
+                    if info.get("kind") in {
+                        "media", "stream_extractor", "default_audio"
+                    }
+                    else ParseMode.MARKDOWN,
+                    reply_markup=keyboard,
                 )
             except Exception:
                 pass
-
-        await asyncio.sleep(0.05)   # ~20 msg/s — stay under flood limit
-
-    _broadcast_running = False
-    await status.edit_text(
-        f"📢 **Broadcast complete!**\n\n"
-        f"✅ Sent    : `{sent}`\n"
-        f"🚫 Blocked : `{blocked}` _(user blocked the bot)_\n"
-        f"❌ Failed  : `{failed}`"
-    )
+    except asyncio.CancelledError:
+        pass
 
 
-# ---------------------------------------------------------------------------
-# /userinfo — inspect any verified user  |  /unverify — remove verification
-# ---------------------------------------------------------------------------
+# ── Progress / Cancel inline callbacks ───────────────────────────────────────
 
-@app.on_message(filters.command(["userinfo", "Userinfo", "user_info"]) & AUTH)
-async def userinfo_cmd(client: Client, message: Message):
-    uid = message.from_user.id
-    if not (is_owner(uid) or is_admin(uid)):
-        return await message.reply_text("❌ Only owner/admin can use /userinfo.")
-
-    args = message.command
-    if len(args) < 2:
-        return await message.reply_text("**Usage:** `/userinfo <user_id>`")
-
-    try:
-        target_id = int(args[1])
-    except ValueError:
-        return await message.reply_text("❌ Invalid user ID — must be a number.")
-
-    vdata   = load_verified()
-    v_entry = vdata.get("verified", {}).get(str(target_id))
-    p_entry = vdata.get("pending",  {}).get(str(target_id))
-
-    # ── Resolve display name from Telegram ─────────────────────────────────
-    try:
-        tg_user  = await client.get_users(target_id)
-        name     = f"{tg_user.first_name or ''} {tg_user.last_name or ''}".strip()
-        username = f"@{tg_user.username}" if tg_user.username else "_none_"
-    except Exception:
-        name     = "_unknown_"
-        username = "_unknown_"
-
-    # ── Roles ───────────────────────────────────────────────────────────────
-    roles = []
-    if is_owner(target_id):  roles.append("👑 Owner")
-    if is_admin(target_id):  roles.append("🛡 Admin")
-    role_str = "  ".join(roles) if roles else "👤 User"
-
-    # ── Verification status ─────────────────────────────────────────────────
-    if is_owner(target_id) or is_admin(target_id):
-        status_str = "✅ Permanent (staff)"
-        plan_str   = "_N/A_"
-        expires_str = "_N/A_"
-        added_str   = "_N/A_"
-    elif v_entry:
-        expires    = v_entry.get("expires_at")
-        added      = v_entry.get("added_at", "_unknown_")
-        plan_str   = v_entry.get("plan", "_unknown_")
-        added_str  = added[:10] if isinstance(added, str) and len(added) >= 10 else str(added)
-        if expires:
-            try:
-                exp_dt = datetime.fromisoformat(expires)
-                if datetime.now(tz) > exp_dt:
-                    status_str  = "⏰ Expired"
-                    expires_str = exp_dt.strftime("%Y-%m-%d %H:%M")
-                else:
-                    status_str  = "✅ Active"
-                    expires_str = exp_dt.strftime("%Y-%m-%d %H:%M")
-            except Exception:
-                status_str  = "✅ Active (no expiry)"
-                expires_str = "_parse error_"
-        else:
-            status_str  = "✅ Active (no expiry)"
-            expires_str = "Never"
-    elif p_entry:
-        status_str  = "⏳ Pending verification"
-        plan_str    = p_entry.get("plan", "_unknown_")
-        expires_str = "_N/A_"
-        added_str   = p_entry.get("added_at", "_unknown_")
+async def rec_progress_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """⚡ Progress button — show the latest details without cached alerts."""
+    query = update.callback_query
+    if query.data == "progress":
+        task_id, info = _stream_task_for_message(query)
     else:
-        status_str  = "❌ Not verified"
-        plan_str    = "_N/A_"
-        expires_str = "_N/A_"
-        added_str   = "_N/A_"
-
-    # ── Active jobs ─────────────────────────────────────────────────────────
-    job_parts = []
-    if target_id in active_recs and active_recs[target_id]:
-        job_parts.append(f"🔴 {len(active_recs[target_id])} recording(s)")
-    if target_id in compress_jobs:  job_parts.append("🗜 compress")
-    if target_id in ss_jobs:        job_parts.append("📸 screenshot")
-    if target_id in merge_sessions: job_parts.append("🔗 merge")
-    jobs_str = "  ".join(job_parts) if job_parts else "_none_"
-
-    text = (
-        f"👤 **User Info**\n"
-        f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-        f"🆔 **ID**       : `{target_id}`\n"
-        f"📛 **Name**     : {name}\n"
-        f"🔗 **Username** : {username}\n"
-        f"🎭 **Role**     : {role_str}\n\n"
-        f"🔐 **Status**   : {status_str}\n"
-        f"📦 **Plan**     : {plan_str}\n"
-        f"📅 **Added**    : {added_str}\n"
-        f"⏳ **Expires**  : {expires_str}\n\n"
-        f"⚙️ **Active jobs** : {jobs_str}\n"
-        f"━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        task_id = query.data.split(":", 1)[1]
+        info = RECORDING_PROGRESS_INFO.get(task_id)
+    if not info:
+        await query.answer("⚠️ Process already ended.", show_alert=True, cache_time=0)
+        return
+    popup = (
+        _build_merge_popup_text(task_id)
+        if info and info.get("kind") == "merge"
+        else _build_stream_popup_text(task_id)
+        if info and info.get("kind") == "stream_extractor"
+        else _build_default_audio_popup_text(task_id)
+        if info and info.get("kind") == "default_audio"
+        else _build_popup_text(task_id)
     )
-    await message.reply_text(text)
+    await query.answer(text=popup, show_alert=True, cache_time=0)
 
 
-@app.on_message(filters.command(["unverify", "Unverify"]) & AUTH)
-async def unverify_cmd(_client: Client, message: Message):
-    uid = message.from_user.id
-    if not (is_owner(uid) or is_admin(uid)):
-        return await message.reply_text("❌ Only owner/admin can use /unverify.")
-
-    args = message.command
-    if len(args) < 2:
-        return await message.reply_text(
-            "**Usage:** `/unverify <user_id>`\n\n"
-            "Removes the user from verified list immediately."
+async def rec_cancel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """❌ Cancel button — terminate the active FFmpeg process immediately."""
+    query = update.callback_query
+    if query.data == "cancel":
+        task_id, info = _stream_task_for_message(query)
+    else:
+        task_id = query.data.split(":", 1)[1]
+        info = RECORDING_PROGRESS_INFO.get(task_id)
+    if not info:
+        await query.answer("⚠️ Process already ended.", show_alert=True, cache_time=0)
+        return
+    # Only the user who started it, or owner/admin, may cancel
+    uid = query.from_user.id
+    if uid != info.get("user_id") and not is_owner(uid) and not is_admin(uid):
+        await query.answer(
+            "❌ Only the user who started the recording can cancel it.",
+            show_alert=True,
         )
-
-    try:
-        target_id = int(args[1])
-    except ValueError:
-        return await message.reply_text("❌ Invalid user ID — must be a number.")
-
-    if is_owner(target_id):
-        return await message.reply_text("❌ Cannot unverify the owner.")
-
-    vdata = load_verified()
-    removed_from = []
-
-    if str(target_id) in vdata.get("verified", {}):
-        del vdata["verified"][str(target_id)]
-        removed_from.append("verified")
-    if str(target_id) in vdata.get("pending", {}):
-        del vdata["pending"][str(target_id)]
-        removed_from.append("pending")
-
-    if not removed_from:
-        return await message.reply_text(f"ℹ️ User `{target_id}` was not in the verified or pending list.")
-
-    save_verified(vdata)
-    await message.reply_text(
-        f"✅ User `{target_id}` removed from **{' & '.join(removed_from)}** list.\n"
-        f"They will need to re-verify to use the bot."
-    )
-
-
-# ---------------------------------------------------------------------------
-# /cancelall — master kill-switch: stop every active job across all users
-# ---------------------------------------------------------------------------
-
-@app.on_message(filters.command(["cancelall", "Cancelall", "cancel_all"]) & AUTH)
-async def cancelall_cmd(_client: Client, message: Message):
-    uid = message.from_user.id
-    if not (is_owner(uid) or is_admin(uid)):
-        return await message.reply_text("❌ Only owner/admin can use /cancelall.")
-
-    import psutil as _psutil
-
-    recs_killed   = 0
-    jobs_killed   = 0
-    merge_killed  = 0
-    other_killed  = 0
-
-    # ── Kill all active recordings (skip owner & admins) ───────────────────
-    for user_id, recs in list(active_recs.items()):
-        if is_owner(user_id) or is_admin(user_id):
-            continue
-        for rec_id, entry in list(recs.items()):
-            cancelled_recs.add((user_id, rec_id))
-            pid = entry.get("ffmpeg_pid")
-            if pid:
-                try:
-                    _psutil.Process(pid).terminate()
-                    LOG.info(f"/cancelall: sent SIGTERM to FFmpeg pid={pid} user={user_id} rec={rec_id}")
-                except Exception as e:
-                    LOG.warning(f"/cancelall: could not terminate FFmpeg pid={pid}: {e}")
-            pt = entry.get("progress_task")
-            if pt:
-                pt.cancel()
-            recs_killed += 1
-
-    # ── Kill compress / download / screenshot jobs (skip owner & admins) ───
-    for user_id in list(user_tasks.keys()):
-        if is_owner(user_id) or is_admin(user_id):
-            continue
-        cancelled_users.add(user_id)
-        pid = user_ffmpeg_pids.get(user_id)
-        if pid:
-            try:
-                _psutil.Process(pid).terminate()
-                LOG.info(f"/cancelall: sent SIGTERM to FFmpeg pid={pid} user={user_id} (job)")
-            except Exception as e:
-                LOG.warning(f"/cancelall: could not terminate FFmpeg pid={pid}: {e}")
-        if user_id in progress_tasks:
-            progress_tasks[user_id].cancel()
-        if user_id in compress_jobs:
-            jobs_killed += 1
-        elif user_id in ss_jobs:
-            jobs_killed += 1
-        else:
-            jobs_killed += 1
-
-    # ── Clear merge sessions (skip owner & admins) ─────────────────────────
-    for user_id in list(merge_sessions.keys()):
-        if is_owner(user_id) or is_admin(user_id):
-            continue
-        merge_sessions.pop(user_id, None)
-        merge_killed += 1
-
-    # ── Clear reclink / title wizard sessions (skip owner & admins) ────────
-    for user_id in list(reclink_jobs.keys()):
-        if is_owner(user_id) or is_admin(user_id):
-            continue
-        reclink_jobs.pop(user_id, None)
-        other_killed += 1
-    for user_id in list(title_jobs.keys()):
-        if is_owner(user_id) or is_admin(user_id):
-            continue
-        title_jobs.pop(user_id, None)
-        other_killed += 1
-
-    total = recs_killed + jobs_killed + merge_killed + other_killed
-    if total == 0:
-        return await message.reply_text("ℹ️ No active jobs to cancel.")
-
-    await message.reply_text(
-        f"🛑 **All jobs cancelled!**\n\n"
-        f"🔴 Recordings stopped : `{recs_killed}`\n"
-        f"⚙️ Jobs stopped       : `{jobs_killed}`\n"
-        f"🔗 Merge sessions     : `{merge_killed}`\n"
-        f"🔎 Other sessions     : `{other_killed}`"
-    )
-
-
-# ---------------------------------------------------------------------------
-# /listusers — paginated list of all verified users (owner/admin)
-# /extendplan <id> <days> — extend a user's expiry by N days
-# ---------------------------------------------------------------------------
-
-_PAGE_SIZE = 15
-
-
-@app.on_message(filters.command(["listusers", "Listusers", "list_users", "lu"]) & AUTH)
-async def listusers_cmd(_client: Client, message: Message):
-    uid = message.from_user.id
-    if not (is_owner(uid) or is_admin(uid)):
-        return await message.reply_text("❌ Only owner/admin can use /listusers.")
-
-    args    = message.command
-    page    = int(args[1]) if len(args) >= 2 and args[1].isdigit() else 1
-    vdata   = load_verified()
-    entries = vdata.get("verified", {})
-
-    if not entries:
-        return await message.reply_text("ℹ️ No verified users yet.")
-
-    # Sort by added_at descending (newest first)
-    def _sort_key(item):
-        return item[1].get("added_at", "") if isinstance(item[1], dict) else ""
-
-    sorted_entries = sorted(entries.items(), key=_sort_key, reverse=True)
-    total          = len(sorted_entries)
-    total_pages    = max(1, (total + _PAGE_SIZE - 1) // _PAGE_SIZE)
-    page           = max(1, min(page, total_pages))
-    start          = (page - 1) * _PAGE_SIZE
-    page_entries   = sorted_entries[start : start + _PAGE_SIZE]
-
-    now = datetime.now(tz)
-    lines = []
-    for i, (uid_str, entry) in enumerate(page_entries, start + 1):
-        plan    = entry.get("plan", "?") if isinstance(entry, dict) else "?"
-        expires = entry.get("expires_at") if isinstance(entry, dict) else None
-        if expires:
-            try:
-                exp_dt = datetime.fromisoformat(expires)
-                if now > exp_dt:
-                    status_icon = "⏰"
-                    exp_str     = exp_dt.strftime("%y-%m-%d")
-                else:
-                    status_icon = "✅"
-                    exp_str     = exp_dt.strftime("%y-%m-%d")
-            except Exception:
-                status_icon, exp_str = "✅", "?"
-        else:
-            status_icon, exp_str = "✅", "∞"
-
-        lines.append(f"{i}. {status_icon} `{uid_str}` — {plan} — exp: {exp_str}")
-
-    text = (
-        f"👥 **Verified Users** — Page `{page}` / `{total_pages}`  (total: `{total}`)\n"
-        f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-        + "\n".join(lines)
-        + f"\n\n_Use_ `/listusers {page + 1}` _for next page_"
-          if page < total_pages else ""
-    )
-    await message.reply_text(text)
-
-
-@app.on_message(filters.command(["extendplan", "Extendplan", "extend"]) & AUTH)
-async def extendplan_cmd(_client: Client, message: Message):
-    uid = message.from_user.id
-    if not (is_owner(uid) or is_admin(uid)):
-        return await message.reply_text("❌ Only owner/admin can use /extendplan.")
-
-    args = message.command
-    if len(args) < 3:
-        return await message.reply_text(
-            "**Usage:** `/extendplan <user_id> <days>`\n\n"
-            "Extends the user's current expiry by the given number of days.\n"
-            "Example: `/extendplan 123456789 30`"
-        )
-
-    try:
-        target_id = int(args[1])
-        days      = int(args[2])
-        if days <= 0:
-            raise ValueError
-    except ValueError:
-        return await message.reply_text("❌ Invalid arguments. User ID and days must be positive numbers.")
-
-    vdata   = load_verified()
-    v_entry = vdata.get("verified", {}).get(str(target_id))
-
-    if not v_entry:
-        return await message.reply_text(
-            f"❌ User `{target_id}` is not in the verified list.\n"
-            f"Use `/userinfo {target_id}` to check their status."
-        )
-
-    # Calculate new expiry
-    expires = v_entry.get("expires_at")
-    now     = datetime.now(tz)
-    if expires:
+        return
+    info["running"] = False
+    info["status"] = "❌ Cancelling..."
+    # Kill current FFmpeg process
+    proc = RECORDING_SESSION_PROC.get(task_id) or info.get("process")
+    if proc and proc.returncode is None:
         try:
-            base = datetime.fromisoformat(expires)
-            base = max(base, now)   # if already expired, extend from today
+            proc.kill()
         except Exception:
-            base = now
-    else:
-        base = now   # no expiry set — start counting from today
-
-    new_expiry = base + timedelta(days=days)
-    v_entry["expires_at"] = new_expiry.isoformat()
-    vdata["verified"][str(target_id)] = v_entry
-    save_verified(vdata)
-
-    await message.reply_text(
-        f"✅ Extended `{target_id}`'s access by **{days} days**.\n"
-        f"📅 New expiry: `{new_expiry.strftime('%Y-%m-%d %H:%M')}`"
-    )
-
-
-# ---------------------------------------------------------------------------
-# /premium_add, /premium_expire, /premium_list — owner/admin only
-# ---------------------------------------------------------------------------
-
-@app.on_message(filters.command(["premium_add", "addpremium", "padd"]) & AUTH)
-async def premium_add_cmd(_client: Client, message: Message):
-    uid = message.from_user.id if message.from_user else 0
-    if not (is_owner(uid) or is_admin(uid)):
-        return await message.reply_text("❌ Only owner/admin can use /premium_add.")
-
-    parts = message.command   # [cmd, user_id, days?, plan?]
-    if len(parts) < 2:
-        return await message.reply_text(
-            "**Usage:** `/premium_add <user_id> [days] [plan_name]`\n\n"
-            "Examples:\n"
-            "`/premium_add 123456789` — 30 days Standard\n"
-            "`/premium_add 123456789 7` — 7 days\n"
-            "`/premium_add 123456789 90 Pro` — 90 days Pro\n"
-            "`/premium_add 123456789 forever` — Lifetime (no expiry)\n\n"
-            f"Plans: {', '.join(_PREMIUM_PLANS)}"
-        )
-
-    try:
-        target_id = int(parts[1])
-    except ValueError:
-        return await message.reply_text("❌ Invalid user ID — must be a number.")
-
-    # Parse optional days argument
-    days: int | None = 30
-    plan = "Standard"
-
-    if len(parts) >= 3:
-        raw_days = parts[2].lower()
-        if raw_days in ("forever", "lifetime", "0", "none", "∞"):
-            days = None
-            plan = "Lifetime"
-        else:
-            raw_days = raw_days.rstrip("d").rstrip("day").rstrip("days")
-            try:
-                days = int(raw_days)
-                if days <= 0:
-                    return await message.reply_text("❌ Days must be a positive number.")
-            except ValueError:
-                # Maybe 3rd arg is the plan name, not days
-                plan = parts[2]
-                days = 30
-
-    if len(parts) >= 4:
-        plan = " ".join(parts[3:])
-
-    entry = add_premium(target_id, days, plan, uid)
-
-    exp = entry.get("expires_at")
-    if exp is None:
-        exp_str = "♾️ **Lifetime** (no expiry)"
-    else:
+            pass
+    # Remove cancel_id from ACTIVE_RECORDINGS so the monitoring loop detects cancellation
+    cancel_id = info.get("cancel_id", "")
+    ACTIVE_RECORDINGS.pop(cancel_id, None)
+    # Stop the auto-updater task
+    task = ACTIVE_UPDATERS.pop(task_id, None)
+    if task and not task.done():
+        task.cancel()
+    if info.get("kind") == "stream_extractor":
         try:
-            exp_dt  = datetime.fromisoformat(exp)
-            exp_str = f"📅 `{exp_dt.strftime('%Y-%m-%d %H:%M')}` ({days} days)"
-        except Exception:
-            exp_str = str(exp)
-
-    await message.reply_text(
-        f"✅ **Premium Granted!**\n\n"
-        f"👤 User ID : `{target_id}`\n"
-        f"🎖️ Plan    : **{plan}**\n"
-        f"⏳ Expires : {exp_str}\n"
-        f"👑 Added by: `{uid}`"
-    )
-
-
-@app.on_message(filters.command(["premium_expire", "expremium", "premiumexpire", "premiumremove", "premiumdel"]) & AUTH)
-async def premium_expire_cmd(_client: Client, message: Message):
-    uid = message.from_user.id if message.from_user else 0
-    if not (is_owner(uid) or is_admin(uid)):
-        return await message.reply_text("❌ Only owner/admin can use /premium_expire.")
-
-    parts = message.command
-    if len(parts) < 2:
-        return await message.reply_text(
-            "**Usage:** `/premium_expire <user_id>`\n\n"
-            "Example: `/premium_expire 123456789`\n"
-            "This immediately expires the user's premium plan."
-        )
-
-    try:
-        target_id = int(parts[1])
-    except ValueError:
-        return await message.reply_text("❌ Invalid user ID.")
-
-    if is_owner(target_id):
-        return await message.reply_text("❌ Cannot expire the owner's premium.")
-
-    ok = remove_premium(target_id)
-    if ok:
-        await message.reply_text(
-            f"✅ **Premium Expired**\n\n"
-            f"👤 User `{target_id}`'s premium has been revoked immediately."
-        )
-    else:
-        await message.reply_text(
-            f"⚠️ User `{target_id}` has no premium entry on record.\n"
-            f"Use `/userinfo {target_id}` to check their status."
-        )
-
-
-@app.on_message(filters.command(["premium_list", "listpremium", "premiumlist", "plist"]) & AUTH)
-async def premium_list_cmd(_client: Client, message: Message):
-    uid = message.from_user.id if message.from_user else 0
-    if not (is_owner(uid) or is_admin(uid)):
-        return await message.reply_text("❌ Only owner/admin can use /premium_list.")
-
-    data  = load_premium()
-    users = data.get("users", {})
-
-    if not users:
-        return await message.reply_text(
-            "📋 **Premium Users List**\n\n"
-            "No premium users found.\n"
-            "Use `/premium_add <user_id>` to grant premium."
-        )
-
-    now    = datetime.now(tz)
-    active = []
-    expired = []
-
-    for uid_str, entry in users.items():
-        exp = entry.get("expires_at")
-        if exp is None:
-            active.append((uid_str, entry))   # lifetime
-        else:
-            try:
-                exp_dt = datetime.fromisoformat(exp)
-                if now < exp_dt:
-                    active.append((uid_str, entry))
-                else:
-                    expired.append((uid_str, entry))
-            except Exception:
-                active.append((uid_str, entry))
-
-    # Sort active by expiry (lifetime last)
-    def sort_key(item):
-        exp = item[1].get("expires_at")
-        return exp if exp else "9999-12-31"
-    active.sort(key=sort_key)
-
-    lines = [f"👑 **Premium Users** — {len(active)} active / {len(expired)} expired\n"]
-
-    if active:
-        lines.append("**✅ Active:**")
-        for uid_str, entry in active:
-            lines.append(_premium_status_line(uid_str, entry))
-
-    if expired:
-        lines.append("\n**❌ Expired:**")
-        for uid_str, entry in expired[:10]:   # cap at 10 to avoid message overflow
-            lines.append(_premium_status_line(uid_str, entry))
-        if len(expired) > 10:
-            lines.append(f"  _…and {len(expired) - 10} more expired entries_")
-
-    lines.append(f"\n_Updated: {now.strftime('%Y-%m-%d %H:%M')} IST_")
-
-    text = "\n".join(lines)
-    # Telegram message limit is 4096 chars
-    if len(text) > 4000:
-        text = text[:3990] + "\n…_(truncated)_"
-
-    await message.reply_text(text)
-
-
-# /mypremium — any authorized user can check their own status
-@app.on_message(filters.command(["mypremium", "myplan", "mystatus", "plan"]) & AUTH)
-async def my_premium_cmd(_client: Client, message: Message):
-    uid  = message.from_user.id
-    now  = datetime.now(tz)
-
-    # Owner / admin → always unlimited
-    if uid in OWNER_IDS:
-        return await message.reply_text(
-            "👑 **Tumhara Status: Owner**\n\n"
-            "✅ Unlimited access — sab kuch khula hai.\n\n"
-            "JioTV: Unlimited recording"
-        )
-    if is_admin(uid):
-        return await message.reply_text(
-            "🛡️ **Tumhara Status: Admin**\n\n"
-            "✅ Unlimited access — sab kuch khula hai.\n\n"
-            "JioTV: Unlimited recording"
-        )
-
-    data  = load_premium()
-    entry = data.get("users", {}).get(str(uid))
-
-    if not entry:
-        return await message.reply_text(
-            "📦 **Tumhara Plan: Free**\n\n"
-            "❌ Premium nahi liya abhi tak.\n\n"
-            "**Free limits:**\n"
-            "• JioTV recording: max 10 seconds\n"
-            "Premium ke liye admin se baat karo! 🚀"
-        )
-
-    exp   = entry.get("expires_at")
-    plan  = entry.get("plan", "Standard")
-    added = entry.get("added_at", "?")
-
-    if exp is None:
-        exp_str     = "♾️ **Lifetime** — kabhi expire nahi hoga"
-        active      = True
-        remaining_d = None
-    else:
-        try:
-            exp_dt      = datetime.fromisoformat(exp)
-            active      = now < exp_dt
-            remaining_d = max((exp_dt - now).days, 0) if active else 0
-            exp_str     = (
-                f"📅 Expire: `{exp_dt.strftime('%d %b %Y, %I:%M %p')}`\n"
-                f"⏳ Bacha: **{remaining_d} din**"
-                if active else
-                f"❌ Expired on `{exp_dt.strftime('%d %b %Y')}`"
-            )
-        except Exception:
-            active, exp_str, remaining_d = True, str(exp), None
-
-    status_icon = "✅" if active else "❌"
-    status_word = "Active" if active else "Expired"
-
-    lines = [
-        f"{status_icon} **Tumhara Plan: {plan}** ({status_word})\n",
-        exp_str,
-        f"\n🗓️ Liya tha: `{added[:10]}`",
-        "\n**Tumhare limits:**",
-    ]
-    if active:
-        lines += [
-            "• JioTV recording: ✅ Unlimited",
-        ]
-    else:
-        lines += [
-            "• JioTV recording: ⏱ max 10 seconds (free limit)",
-            "\nPremium renew ke liye admin se baat karo! 🚀",
-        ]
-
-    await message.reply_text("\n".join(lines))
-
-
-# ---------------------------------------------------------------------------
-# DM Relay — forward user messages to owner; relay owner replies back
-# ---------------------------------------------------------------------------
-
-_RELAY_MAP_MAX = 2000   # cap memory usage
-_OWNER_FILTER  = filters.user(list(OWNER_IDS) if OWNER_IDS else [0])
-
-
-# ---------------------------------------------------------------------------
-# /relay on|off — toggle relay
-# ---------------------------------------------------------------------------
-
-@app.on_message(filters.command(["relay"]) & _OWNER_FILTER)
-async def relay_toggle_cmd(_client: Client, message: Message):
-    """Owner-only: /relay on|off"""
-    global relay_enabled
-    args = message.command
-    if len(args) < 2 or args[1].lower() not in ("on", "off"):
-        state = "✅ ON" if relay_enabled else "❌ OFF"
-        return await message.reply_text(
-            f"📡 **DM Relay** is currently **{state}**\n\n"
-            "Toggle: `/relay on` | `/relay off`\n"
-            "Send DM to user: `/DM <user_id> <text>`\n"
-            "Block user: `/DM <user_id> delete`"
-        )
-    relay_enabled = args[1].lower() == "on"
-    state = "✅ ON" if relay_enabled else "❌ OFF"
-    await message.reply_text(f"📡 **DM Relay** turned **{state}**.")
-
-
-# ---------------------------------------------------------------------------
-# /DM <user_id> <text|delete> — owner → user direct message or block
-# ---------------------------------------------------------------------------
-
-@app.on_message(filters.command(["DM", "dm"]) & _OWNER_FILTER)
-async def dm_cmd(client: Client, message: Message):
-    """/DM <user_id> <text>  — send message to user by ID
-       /DM <user_id> delete  — block user from relay"""
-    args = message.command
-    if len(args) < 2:
-        return await message.reply_text(
-            "**Usage:**\n"
-            "`/DM <user_id> <your message>` — send DM to user\n"
-            "`/DM <user_id> delete` — block user from relay\n\n"
-            "**Blocked users:** " + (
-                ", ".join(f"`{u}`" for u in relay_blocked) or "none"
-            )
-        )
-
-    try:
-        target_id = int(args[1])
-    except ValueError:
-        return await message.reply_text("❌ Invalid user ID. Must be a number.")
-
-    if len(args) < 3:
-        return await message.reply_text(
-            "❌ Provide a message or `delete`.\n"
-            "Example: `/DM 123456789 Hello!`"
-        )
-
-    action = " ".join(args[2:])
-
-    # /DM <id> delete — block from relay
-    if action.lower() == "delete":
-        relay_blocked.add(target_id)
-        # Remove any queued relay entries for this user
-        blocked_keys = [k for k, v in relay_map.items() if v == target_id]
-        for k in blocked_keys:
-            del relay_map[k]
-        return await message.reply_text(
-            f"🚫 User `{target_id}` blocked from DM relay.\n"
-            f"Their messages will no longer be forwarded.\n\n"
-            f"To unblock: `/DM {target_id} unblock`"
-        )
-
-    # /DM <id> unblock
-    if action.lower() == "unblock":
-        relay_blocked.discard(target_id)
-        return await message.reply_text(f"✅ User `{target_id}` unblocked from relay.")
-
-    # /DM <id> <text> — send message
-    try:
-        sent = await client.send_message(target_id, action)
-        relay_map[sent.id] = target_id
-        await message.reply_text(f"✅ Message sent to `{target_id}`.")
-    except Exception as e:
-        await message.reply_text(f"❌ Failed to send to `{target_id}`: {e}")
-
-
-# ---------------------------------------------------------------------------
-# Relay user DM → owner  (verified users only; normal/unverified = skipped)
-# ---------------------------------------------------------------------------
-
-@app.on_message(filters.private & AUTH, group=5)
-async def relay_to_owner(client: Client, message: Message):
-    """Forward verified user DMs to the owner."""
-    if not relay_enabled:
-        return
-    user_id = message.from_user.id
-    # Only relay messages from regular users (not owner/admin)
-    if is_owner(user_id) or is_admin(user_id):
-        return
-    if not OWNER_IDS:
-        return
-    # Skip blocked users
-    if user_id in relay_blocked:
-        return
-    # Skip command messages
-    if message.text and message.text.startswith("/"):
-        return
-    # Skip during active merge session
-    if user_id in merge_sessions:
-        return
-    # ✅ Only relay verified users — group normal users are skipped
-    if not is_verified(user_id):
-        return
-
-    owner_id = list(OWNER_IDS)[0]
-    u = message.from_user
-    name = f"{u.first_name or ''} {u.last_name or ''}".strip() or "Unknown"
-    uname = f"@{u.username}" if u.username else "no username"
-    info = (
-        f"📨 **User DM**\n"
-        f"👤 {name}  |  {uname}\n"
-        f"🆔 `{user_id}`\n"
-        f"💬 Reply to this to respond  |  `/DM {user_id} delete` to block"
-    )
-    try:
-        fwd = await client.forward_messages(owner_id, message.chat.id, message.id)
-        await client.send_message(owner_id, info)
-        if len(relay_map) >= _RELAY_MAP_MAX:
-            oldest = next(iter(relay_map))
-            del relay_map[oldest]
-        relay_map[fwd.id] = user_id
-    except Exception as e:
-        LOG.warning("relay_to_owner failed uid=%s: %s", user_id, e)
-
-
-# ---------------------------------------------------------------------------
-# Relay owner reply → user
-# ---------------------------------------------------------------------------
-
-@app.on_message(
-    filters.private & filters.reply & _OWNER_FILTER,
-    group=5
-)
-async def relay_to_user(client: Client, message: Message):
-    """Relay owner's reply back to the original user."""
-    replied = message.reply_to_message
-    if not replied:
-        return
-    user_id = relay_map.get(replied.id)
-    if not user_id:
-        return
-    try:
-        await client.forward_messages(user_id, message.chat.id, message.id)
-        await message.reply_text(f"✅ Reply sent to `{user_id}`.", quote=True)
-    except Exception as e:
-        await message.reply_text(f"❌ Could not deliver to `{user_id}`: {e}", quote=True)
-
-
-# =============================================================================
-# Entry point (merged from main.py)
-# =============================================================================
-
-from pyrogram.types import BotCommand
-
-_BOT_COMMANDS = [
-    BotCommand("start",          "Welcome message"),
-    BotCommand("help",           "All commands and usage guide"),
-    BotCommand("rec",            "Record HLS/M3U8/DASH stream (wizard)"),
-    BotCommand("drec",           "Direct record — no wizard, instant start"),
-    BotCommand("reclink",        "Auto-extract stream from a web page"),
-    BotCommand("download",       "Download from OTT platforms"),
-    BotCommand("compress",        "Compress a video (reply to video)"),
-    BotCommand("compressadvance", "Compress: 576p · 350 MB · Multi audio (all users)"),
-    BotCommand("screenshot",     "Extract screenshots from a video"),
-    BotCommand("trim",           "Trim a video clip"),
-    BotCommand("merge",          "Merge multiple videos"),
-    BotCommand("watermark",      "Burn watermark into a video (reply to video)"),
-    BotCommand("audiotrack",     "Lock audio track metadata without re-encoding"),
-    BotCommand("gdrive",         "Connect or manage Google Drive"),
-    BotCommand("drivelogout",    "Disconnect Google Drive account"),
-    BotCommand("set_cookies",    "Upload cookies.txt for OTT login"),
-    BotCommand("cookies_status", "Show stored cookies"),
-    BotCommand("del_cookies",    "Delete stored cookies"),
-    BotCommand("statusme",       "Show active recording or job status"),
-    BotCommand("cancelme",       "Cancel active recording or job"),
-    BotCommand("limit",          "Check your recording quota"),
-    BotCommand("plan",           "Subscription plans"),
-    BotCommand("contact",        "Support contact"),
-    BotCommand("channel",        "Browse available channels"),
-    BotCommand("search",         "Search channels"),
-    BotCommand("verify",         "Verify your account"),
-    BotCommand("Admin_add",      "Add an admin by user ID (owner only)"),
-    BotCommand("Admin_delete",   "Remove an admin by user ID (owner only)"),
-    BotCommand("stats",          "Bot statistics dashboard (owner/admin only)"),
-    BotCommand("broadcast",      "Send message to all verified users (owner/admin)"),
-    BotCommand("userinfo",       "Inspect a verified user's details (owner/admin)"),
-    BotCommand("unverify",       "Remove a user's verification (owner/admin)"),
-    BotCommand("cancelall",      "Cancel every active job across all users (owner/admin)"),
-    BotCommand("listusers",      "Paginated list of all verified users (owner/admin)"),
-    BotCommand("extendplan",     "Extend a user's plan by N days (owner/admin)"),
-    BotCommand("premium_add",    "Grant premium plan to a user (owner/admin)"),
-    BotCommand("premium_expire", "Revoke a user's premium plan (owner/admin)"),
-    BotCommand("premium_list",   "List all premium users with status (owner/admin)"),
-    BotCommand("autocompress",    "Toggle auto-compression for 800MB-1GB files (owner only)"),
-    BotCommand("compresssettings","View/change auto-compress thresholds (owner only)"),
-    BotCommand("di",              "Quick JioTV catchup record for today (channel -t time - time file.mkv)"),
-]
-
-
-async def _register_commands():
-    try:
-        await app.set_bot_commands(_BOT_COMMANDS)
-        LOG.info("Bot commands registered (%d).", len(_BOT_COMMANDS))
-    except Exception as e:
-        LOG.warning("Could not register bot commands: %s", e)
-
-
-# Register commands on every successful connection (handles reconnects too)
-@app.on_disconnect()
-async def _on_reconnect(_client):
-    pass  # placeholder — keeps decorator happy
-
-
-# Use a raw update handler that fires once to register commands
-import asyncio as _asyncio
-
-_commands_registered = False
-
-
-@app.on_raw_update()
-async def _register_once(_client, _update, _users, _chats):
-    global _commands_registered
-    if not _commands_registered:
-        _commands_registered = True
-        _asyncio.create_task(_register_commands())
-
-
-# ---------------------------------------------------------------------------
-# JioTV — Login + Channel List + Live Recording (via bot/jiotv.py module)
-# ---------------------------------------------------------------------------
-
-_jiotv_cat_cache: dict = {}
-_jiotv_ch_cache:  dict = {}
-
-
-# /jiotvlogin <phone>  — ADMIN ONLY
-@app.on_message(filters.command(["jiotvlogin", "JioTVLogin", "login"]) & _OWNER_FILTER)
-async def jiotv_login_cmd(client: Client, message: Message):
-    args = message.command
-    if len(args) < 2:
-        return await message.reply_text(
-            "**Usage:** `/jiotvlogin <10-digit mobile number>`\n\n"
-            "Example: `/jiotvlogin 9876543210`\n\n"
-            "_(Sirf admin use kare — ek baar login karo, baaki sab use kar sakte hain)_"
-        )
-    phone = args[1].strip()
-    if not phone.isdigit() or len(phone) != 10:
-        return await message.reply_text("❌ 10-digit number dena hai, country code nahi.")
-
-    status = await message.reply_text(f"📲 OTP bhej raha hoon **{phone}** pe…")
-    result = await asyncio.get_event_loop().run_in_executor(None, jiotv.send_otp, phone)
-    if result["success"]:
-        await status.edit_text(
-            f"✅ {result['message']}\n\nOTP mila? Send karo:\n`/jiotvotp <6-digit OTP>`"
-        )
-    else:
-        await status.edit_text(f"❌ {result['message']}")
-
-
-# /jiotvotp <otp>  — ADMIN ONLY
-@app.on_message(filters.command(["jiotvotp", "JioTVOTP", "otp"]) & _OWNER_FILTER)
-async def jiotv_otp_cmd(client: Client, message: Message):
-    args = message.command
-    if len(args) < 2:
-        return await message.reply_text("**Usage:** `/jiotvotp <6-digit OTP>`")
-    otp    = args[1].strip()
-    status = await message.reply_text("🔐 OTP verify kar raha hoon…")
-    result = await asyncio.get_event_loop().run_in_executor(None, jiotv.verify_otp, otp)
-    if result["success"]:
-        await status.edit_text(
-            f"✅ **JioTV Login Successful!**\n\n{result['message']}\n\n"
-            "Commands:\n"
-            "• `/jiochannels` — channel list\n"
-            "• `/jiorec <channel> <duration>` — live record\n\n"
-            "Example: `/jiorec Pogo 01:00:00`"
-        )
-    else:
-        await status.edit_text(f"❌ {result['message']}")
-
-
-# /jiochannels [category]
-@app.on_message(filters.command(["jiochannels", "JioChannels", "channels"]) & AUTH)
-async def jiotv_channels_cmd(client: Client, message: Message):
-    uid = message.from_user.id
-    if not jiotv.is_logged_in():
-        return await message.reply_text(
-            "❌ JioTV mein login nahi hai.\nAdmin se kaho `/jiotvlogin` kare."
-        )
-    status   = await message.reply_text("📡 JioTV channels fetch kar raha hoon…")
-    channels = await asyncio.get_event_loop().run_in_executor(None, jiotv.get_channels)
-    if not channels:
-        return await status.edit_text(
-            "❌ Channels load nahi hue.\nDobara login karo: `/jiotvlogin <phone>`"
-        )
-
-    cats: dict = {}
-    for ch in channels:
-        cat = ch.get("channelCategoryName") or ch.get("category") or "Other"
-        cats.setdefault(cat, []).append(ch)
-
-    args = message.command
-    if len(args) >= 2:
-        query_cat = " ".join(args[1:]).strip().lower()
-        matched   = {k: v for k, v in cats.items() if query_cat in k.lower()}
-        if not matched:
-            return await status.edit_text(
-                f"❌ Category `{query_cat}` nahi mili.\n\nAvailable: {', '.join(list(cats.keys())[:20])}"
-            )
-        cats = matched
-
-    _jiotv_cat_cache[uid] = cats
-    cat_names = sorted(cats.keys())
-    rows, row = [], []
-    for cat in cat_names[:24]:
-        count = len(cats[cat])
-        row.append(InlineKeyboardButton(f"{cat} ({count})", callback_data=f"jtv_cat:{uid}:{cat[:20]}"))
-        if len(row) == 2:
-            rows.append(row); row = []
-    if row:
-        rows.append(row)
-
-    await status.edit_text(
-        f"📺 **JioTV — {len(channels)} Channels**\n\nCategory select karo:",
-        reply_markup=InlineKeyboardMarkup(rows)
-    )
-
-
-@app.on_callback_query(filters.regex(r"^jtv_cat:"))
-async def jiotv_cat_cb(client: Client, cq: CallbackQuery):
-    parts    = cq.data.split(":", 2)
-    uid, cat = int(parts[1]), parts[2]
-    if cq.from_user.id != uid:
-        return await cq.answer("Yeh tumhara session nahi hai.", show_alert=True)
-    cats     = _jiotv_cat_cache.get(uid, {})
-    full_cat = next((k for k in cats if k[:20] == cat), cat)
-    channels = cats.get(full_cat, [])
-    if not channels:
-        return await cq.answer("No channels in this category.", show_alert=True)
-    ch_map = _jiotv_ch_cache.setdefault(uid, {})
-    for ch in channels:
-        name = ch.get("channelName") or ch.get("channel_name") or ""
-        ch_map[name.lower()] = ch
-    rows, row = [], []
-    for ch in channels[:48]:
-        name  = ch.get("channelName") or ch.get("channel_name") or "?"
-        ch_id = str(ch.get("channel_id") or ch.get("id") or "")
-        row.append(InlineKeyboardButton(name, callback_data=f"jtv_ch:{uid}:{ch_id}"))
-        if len(row) == 2:
-            rows.append(row); row = []
-    if row:
-        rows.append(row)
-    rows.append([InlineKeyboardButton("◀️ Back", callback_data=f"jtv_back:{uid}")])
-    await cq.message.edit_text(
-        f"📺 **{full_cat}** — {len(channels)} channels\n\nRecord karne ke liye:\n`/jiorec <channel name> <duration>`",
-        reply_markup=InlineKeyboardMarkup(rows)
-    )
-    await cq.answer()
-
-
-@app.on_callback_query(filters.regex(r"^jtv_back:"))
-async def jiotv_back_cb(client: Client, cq: CallbackQuery):
-    uid  = int(cq.data.split(":")[1])
-    if cq.from_user.id != uid:
-        return await cq.answer("Yeh tumhara session nahi hai.", show_alert=True)
-    cats      = _jiotv_cat_cache.get(uid, {})
-    cat_names = sorted(cats.keys())
-    rows, row = [], []
-    for cat in cat_names[:24]:
-        count = len(cats[cat])
-        row.append(InlineKeyboardButton(f"{cat} ({count})", callback_data=f"jtv_cat:{uid}:{cat[:20]}"))
-        if len(row) == 2:
-            rows.append(row); row = []
-    if row:
-        rows.append(row)
-    await cq.message.edit_text(
-        "📺 **JioTV — Category select karo:**",
-        reply_markup=InlineKeyboardMarkup(rows)
-    )
-    await cq.answer()
-
-
-@app.on_callback_query(filters.regex(r"^jtv_ch:"))
-async def jiotv_ch_cb(client: Client, cq: CallbackQuery):
-    parts  = cq.data.split(":", 2)
-    uid, ch_id = int(parts[1]), parts[2]
-    if cq.from_user.id != uid:
-        return await cq.answer("Yeh tumhara session nahi hai.", show_alert=True)
-    ch_map   = _jiotv_ch_cache.get(uid, {})
-    ch_entry = next((v for v in ch_map.values()
-                     if str(v.get("channel_id") or v.get("id") or "") == ch_id), None)
-    ch_name  = (ch_entry.get("channelName") or ch_entry.get("channel_name") or ch_id) if ch_entry else ch_id
-    await cq.answer(f"✅ {ch_name} selected!")
-    await cq.message.reply_text(
-        f"📺 **{ch_name}** select hua!\n\n"
-        f"Record karne ke liye:\n`/jiorec {ch_name} 01:00:00`\n\n"
-        f"_(Duration: HH:MM:SS)_"
-    )
-
-
-# /jiorec <channel name> <duration>
-@app.on_message(filters.command(["jiorec", "JioRec"]) & AUTH)
-async def jiotv_rec_cmd(client: Client, message: Message):
-    uid = message.from_user.id
-    try:
-        if not jiotv.is_logged_in():
-            return await message.reply_text(
-                "❌ **JioTV mein login nahi hai.**\n\n"
-                "Admin se kaho pehle yeh kare:\n"
-                "`/jiotvlogin <10-digit phone number>`\n\n"
-                "Example: `/jiotvlogin 9876543210`"
-            )
-        args = message.command
-        if len(args) < 3:
-            return await message.reply_text(
-                "**Usage:** `/jiorec <channel name> <duration>`\n\n"
-                "Example: `/jiorec Pogo 01:00:00`\n"
-                "Channel list: `/jiochannels`"
-            )
-
-        duration_str = args[-1].strip()
-        ch_name_raw  = " ".join(args[1:-1]).strip()
-        duration_sec = _parse_duration_token(duration_str)
-        if duration_sec <= 0:
-            return await message.reply_text("❌ Duration galat. Format: `HH:MM:SS` ya `30m`")
-
-        # Tier-based recording limits
-        # Owner: unlimited | Premium: max 2 hours | Free/Verified: max 1 hour
-        _is_owner   = uid in OWNER_IDS
-        _is_premium = is_premium(uid)
-        if not _is_owner:
-            if _is_premium:
-                _max_rec = 2 * 3600   # 2 hours
-                _limit_label = "2 hours (Premium)"
-            else:
-                _max_rec = 3600       # 1 hour
-                _limit_label = "1 hour (Free/Verified)"
-            if duration_sec > _max_rec:
-                return await message.reply_text(
-                    f"⏱ **Recording limit crossed!**\n\n"
-                    f"Your plan allows max **{_limit_label}** per recording.\n"
-                    f"You requested: `{_seconds_to_hms(duration_sec)}`\n\n"
-                    f"{'Upgrade to Premium for 2-hour recordings.' if not _is_premium else ''}"
-                    f"\nUse `/contact` to upgrade. 🚀"
-                )
-
-        status   = await message.reply_text(f"🔍 JioTV mein **{ch_name_raw}** dhundh raha hoon…")
-        channels = await asyncio.get_event_loop().run_in_executor(None, jiotv.get_channels)
-
-        ch_name_lower = ch_name_raw.lower()
-        matched = None
-        for ch in channels:
-            name = (ch.get("channelName") or ch.get("channel_name") or "").lower()
-            if name == ch_name_lower:
-                matched = ch; break
-        if not matched:
-            for ch in channels:
-                name = (ch.get("channelName") or ch.get("channel_name") or "").lower()
-                if ch_name_lower in name:
-                    matched = ch; break
-
-        if not matched:
-            similar = [(ch.get("channelName") or ch.get("channel_name") or "")
-                       for ch in channels if ch_name_lower[:4] in (ch.get("channelName") or "").lower()][:6]
-            hint = "\n".join(f"• {s}" for s in similar) if similar else "Channel list: `/jiochannels`"
-            return await status.edit_text(f"❌ Channel **{ch_name_raw}** nahi mila.\n\nShayad:\n{hint}")
-
-        ch_id    = str(matched.get("channel_id") or matched.get("id") or "")
-        ch_label = matched.get("channelName") or matched.get("channel_name") or ch_name_raw
-
-        await status.edit_text(f"📡 **{ch_label}** ka stream URL fetch kar raha hoon…")
-        result = await asyncio.get_event_loop().run_in_executor(None, jiotv.get_stream_url, ch_id)
-        if not result["success"]:
-            return await status.edit_text(
-                f"❌ Stream URL nahi mila: {result['message']}\n\nDobara login karo: `/jiotvlogin <phone>`"
-            )
-
-        stream_url = result["url"]
-        LOG.info("JioTV stream for %s (id=%s): %s", ch_label, ch_id, stream_url[:80])
-        dur_hms  = _seconds_to_hms(duration_sec)
-        filename = re.sub(r"[^\w\s-]", "", ch_label).strip().replace(" ", "_")
-
-        setup = {
-            "user_id": uid, "chat_id": message.chat.id,
-            "url": stream_url, "timestamp": duration_sec,
-            "filename": filename, "watermark_on": True,
-            "watermark_pos": "bottom_right",
-            "watermark_text": get_default_watermark(),
-            "audio_track": [], "auto_mode": False,
-            "quality": "original", "aspect": "none",
-            "step": 0, "detected_audio_tracks": [],
-            "effective_url": stream_url, "orig_msg": message,
-            "is_hls": True,
-            "jiotv": True, "jiotv_channel": ch_label,
-        }
-        rec_setup_sessions[uid] = setup
-        await status.edit_text(
-            f"✅ **{ch_label}** — Stream ready!\n"
-            f"⏱ Duration: `{dur_hms}`\n📡 Source: JioTV Live\n\n⚙️ Setup wizard khul raha hai…"
-        )
-        tracks = await _probe_audio_tracks(stream_url)
-        setup["detected_audio_tracks"] = tracks
-        wizard_msg = await message.reply_text(_audio_step_text(setup), reply_markup=_kb_audio_step(setup))
-        setup["setup_msg_id"] = wizard_msg.id
-    except Exception as e:
-        LOG.exception("jiotv_rec_cmd error uid=%s: %s", uid, e)
-        try:
-            await message.reply_text(
-                f"❌ **Kuch galat ho gaya:**\n`{e}`\n\n"
-                f"Agar yeh baar baar aaye toh `/jiotvlogin` se dobara login karo."
+            await query.edit_message_text(
+                "❌ Extraction Cancelled\n\n⚠️ Partial Output Deleted"
             )
         except Exception:
             pass
+        await query.answer("Extraction cancelling...", cache_time=0)
+        return
+    if info.get("kind") == "default_audio":
+        info["cancel_message_sent"] = True
+        context.user_data["default_audio_cancelled"] = True
+        pending = context.user_data.get("default_audio_pending") or {}
+        job_task = pending.get("job_task")
+        if job_task and not job_task.done():
+            job_task.cancel()
+        try:
+            await query.edit_message_text(
+                "❌ Default Audio Update Cancelled\n\n"
+                "⚠️ Partial Output Deleted"
+            )
+        except Exception:
+            pass
+        await query.answer("Cancelling...", cache_time=0)
+        return
+    message = (
+        "⏳ Cancelling merge..."
+        if info.get("kind") == "merge"
+        else "⏳ Cancelling recording..."
+    )
+    await query.answer(message, cache_time=0)
+    # The owning job handles partial upload and the final message update.
 
 
-# /jiotvlogout  — ADMIN ONLY
-@app.on_message(filters.command(["jiotvlogout", "JioTVLogout"]) & _OWNER_FILTER)
-async def jiotv_logout_cmd(client: Client, message: Message):
-    if not jiotv.is_logged_in():
-        return await message.reply_text("❌ JioTV mein login nahi hai.")
-    jiotv.logout()
-    await message.reply_text("✅ JioTV logout ho gaya. Ab koi bhi JioTV use nahi kar sakta.")
+# ── End new progress system ───────────────────────────────────────────────────
 
 
-# /jiotvstatus
-@app.on_message(filters.command(["jiotvstatus", "JioTVStatus", "jiostatus"]) & AUTH)
-async def jiotv_status_cmd(client: Client, message: Message):
-    if not jiotv.is_logged_in():
-        return await message.reply_text(
-            "❌ JioTV login nahi hai.\nAdmin se kaho `/jiotvlogin <phone>` kare."
+async def probe_audio_tracks(stream_url: str, cookie: str = "",
+                             user_agent: str = "", cenc_key: str = "") -> list:
+    """Probe audio streams and return their ordinal index plus readable labels."""
+    cmd = ["ffprobe", "-v", "error", "-select_streams", "a",
+           "-show_entries", "stream_tags=language,title",
+           "-of", "json"]
+    if cookie or user_agent:
+        headers = ""
+        if cookie:
+            headers += f"Cookie: {cookie}\r\n"
+        if user_agent:
+            headers += f"User-Agent: {user_agent}\r\n"
+        cmd += ["-headers", headers]
+    if user_agent:
+        cmd += ["-user_agent", user_agent]
+    if cookie:
+        cmd += ["-cookies", cookie]
+    if cenc_key:
+        cmd += ["-cenc_decryption_key", cenc_key]
+    cmd += [stream_url]
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
         )
-    await message.reply_text(
-        "✅ **JioTV Login Active**\n\n"
-        "Commands:\n"
-        "• `/jiochannels` — channel list\n"
-        "• `/jiorec <channel> <duration>` — live record\n"
-        "• `/jiotvlogout` — logout"
+        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=25)
+        if proc.returncode != 0:
+            return []
+        streams = json.loads(stdout.decode(errors="replace")).get("streams", [])
+    except (asyncio.TimeoutError, json.JSONDecodeError, OSError):
+        return []
+
+    tracks = []
+    for ordinal, stream in enumerate(streams):
+        tags = stream.get("tags") or {}
+        language = str(tags.get("language", "")).lower()
+        title = str(tags.get("title", "")).strip()
+        text = f"{language} {title}".lower()
+        name = next(
+            (label for key, label in (
+                ("hin", "Hindi"), ("hindi", "Hindi"),
+                ("hi", "Hindi"),
+                ("tam", "Tamil"), ("tamil", "Tamil"),
+                ("ta", "Tamil"),
+                ("tel", "Telugu"), ("telugu", "Telugu"),
+                ("te", "Telugu"),
+                ("kan", "Kannada"), ("kannada", "Kannada"),
+                ("kn", "Kannada"),
+                ("mal", "Malayalam"), ("ml", "Malayalam"),
+                ("mar", "Marathi"), ("mr", "Marathi"),
+                ("eng", "English"), ("english", "English"),
+                ("en", "English"),
+                ("ori", "Odia"), ("odia", "Odia"),
+                ("or", "Odia"),
+            ) if key in text),
+            title or language.upper() or f"Audio {ordinal + 1}",
+        )
+        language_code = next(
+            (
+                code for code, label in (
+                    ("hin", "Hindi"), ("tam", "Tamil"), ("tel", "Telugu"),
+                    ("kan", "Kannada"), ("mal", "Malayalam"),
+                    ("mar", "Marathi"), ("eng", "English"), ("ori", "Odia"),
+                )
+                if label.lower() == name.lower()
+            ),
+            language if len(language) in (2, 3) else "",
+        )
+        tracks.append({
+            "index": ordinal,
+            "name": name,
+            "language_code": language_code,
+        })
+    return tracks
+
+
+def _audio_statuses(tracks):
+    """Build the requested language status line from ffprobe results."""
+    names = {track["name"].lower() for track in tracks}
+    return " ".join(
+        f"{language} {'✅' if language.lower() in names else '❎'}"
+        for language in (
+            "Hindi", "Tamil", "Telugu", "Malayalam", "Kannada",
+            "Marathi", "English", "Odia",
+        )
     )
 
 
-# ---------------------------------------------------------------------------
-# /dl  — JioTV catchup download
-# Syntax:
-#   /dl -Jiotv -c ChannelName -t DD-MM-YYYY HH:MM AM/PM - HH:MM AM/PM -n File
-# ---------------------------------------------------------------------------
+def _audio_index_for_language(tracks, language):
+    language = language.lower()
+    for track in tracks:
+        if track["name"].lower() == language:
+            return track["index"]
+    return tracks[0]["index"] if tracks else 0
 
-def _parse_dl_command(text: str) -> dict | None:
-    """
-    Parse /dl command arguments.
-    Returns dict with keys: source, channel, begin_ts, end_ts, filename
-    or None on parse failure.
-    """
-    import re as _re
-    # Remove the command itself
-    text = _re.sub(r"^/dl\s*", "", text, flags=_re.IGNORECASE).strip()
 
-    # Extract source: -Jiotv or -Tplay (case-insensitive)
-    src_match = _re.search(r"-([Jj]iotv)\b", text)
-    if not src_match:
-        return None
-    source = "jiotv"
+def _audio_options(audio_mode: str, audio_index: int,
+                   audio_tracks: list | None = None) -> list:
+    """Return FFmpeg audio maps for the requested output tracks."""
+    if audio_mode == "multi" and not audio_tracks:
+        return [
+            "-map", "0:a?",
+            "-disposition:a:0", "default",
+        ]
+    if audio_mode != "multi":
+        return [
+            "-map", f"0:a:{max(0, int(audio_index))}?",
+            "-disposition:a:0", "default",
+        ]
 
-    # Extract -c <channel name>
-    ch_match = _re.search(r"-c\s+(.+?)(?=\s+-[a-zA-Z])", text + " -z")
-    if not ch_match:
-        return None
-    channel = ch_match.group(1).strip()
+    options = []
+    for output_index, track in enumerate(audio_tracks):
+        source_index = max(0, int(track.get("index", output_index)))
+        options += ["-map", f"0:a:{source_index}?"]
+        options += [
+            f"-disposition:a:{output_index}",
+            "default" if output_index == 0 else "0",
+        ]
+    return options
 
-    # Extract -n <filename>
-    fn_match = _re.search(r"-n\s+(.+?)(?=\s+-[a-zA-Z]|$)", text + " -z")
-    if not fn_match:
-        return None
-    filename = fn_match.group(1).strip()
 
-    # Extract -t DD-MM-YYYY HH:MM AM/PM - HH:MM AM/PM
-    # Format: -t 02-07-2026 09:00 AM - 11:00 AM
-    t_match = _re.search(
-        r"-t\s+(\d{2}-\d{2}-\d{4})\s+(\d{1,2}:\d{2})\s*([AaPp][Mm])\s*-\s*(\d{1,2}:\d{2})\s*([AaPp][Mm])",
-        text,
+def _recording_bitrates(duration_seconds: int, audio_mode: str,
+                        audio_tracks: list | None = None) -> tuple[str, str]:
+    """Choose duration-aware bitrates for 576p multi-audio recordings."""
+    track_count = (
+        len(audio_tracks) if audio_mode == "multi" and audio_tracks
+        else 1
     )
-    if not t_match:
-        return None
+    audio_bitrate = 64_000
+    # Keep room for MP4 overhead and bitrate variance instead of spending the
+    # entire file-size limit on nominal media bitrate.
+    # Keep bitrate proportional to the requested duration while retaining
+    # good 576p quality. The Telegram/local Bot API limit is enforced by the
+    # upload client, not by an arbitrary 500 MB application cutoff.
+    budget_bps = 2_800_000
+    reserved_audio_bps = track_count * audio_bitrate
+    video_bps = int(budget_bps - reserved_audio_bps)
+    video_bps = max(350_000, min(2_500_000, video_bps))
+    return f"{video_bps // 1000}k", f"{audio_bitrate // 1000}k"
 
-    date_str   = t_match.group(1)      # DD-MM-YYYY
-    start_time = t_match.group(2)      # HH:MM
-    start_ampm = t_match.group(3).upper()  # AM/PM
-    end_time   = t_match.group(4)      # HH:MM
-    end_ampm   = t_match.group(5).upper()  # AM/PM
 
+async def _edit_callback_message(query, text, **kwargs):
+    """Edit a callback message without logging harmless no-op edit errors."""
     try:
-        import pytz as _pytz
-        from datetime import datetime as _dt
-        ist = _pytz.timezone("Asia/Kolkata")
-
-        def _parse_time(date_s, time_s, ampm_s):
-            dt = _dt.strptime(f"{date_s} {time_s} {ampm_s}", "%d-%m-%Y %I:%M %p")
-            return ist.localize(dt)
-
-        begin_dt = _parse_time(date_str, start_time, start_ampm)
-        end_dt   = _parse_time(date_str, end_time,   end_ampm)
-
-        # If end < begin, end is next day
-        if end_dt <= begin_dt:
-            from datetime import timedelta as _td
-            end_dt += _td(days=1)
-
-        begin_ts = int(begin_dt.timestamp())
-        end_ts   = int(end_dt.timestamp())
-    except Exception:
-        return None
-
-    duration_sec = end_ts - begin_ts
-    if duration_sec <= 0 or duration_sec > 24 * 3600:
-        return None
-
-    return {
-        "source":       source,
-        "channel":      channel,
-        "begin_ts":     begin_ts,
-        "end_ts":       end_ts,
-        "duration_sec": duration_sec,
-        "filename":     filename,
-        "date_str":     date_str,
-        "start_time":   f"{start_time} {start_ampm}",
-        "end_time":     f"{end_time} {end_ampm}",
-    }
+        await query.edit_message_text(text, **kwargs)
+    except Exception as exc:
+        if "Message is not modified" not in str(exc):
+            raise
 
 
-# ---------------------------------------------------------------------------
-# /di  — Quick JioTV catchup for TODAY (simpler syntax)
-# Format: /di <channel> -t <HH:MM AM/PM> - <HH:MM AM/PM> <filename.mkv>
-# Example: /di Pogo -t 12:00PM - 01:00PM ls.mkv
-# ---------------------------------------------------------------------------
-
-def _parse_di_command(text: str) -> dict | None:
-    """
-    Parse /di command.
-    Format: /di <channel> -t HH:MM AM/PM - HH:MM AM/PM <filename.mkv>
-    Returns dict with channel, begin_ts, end_ts, duration_sec, filename,
-    plus h24_start, h24_end (24-hour strings for proxy) or None.
-    """
-    import re as _re
-    import pytz as _pytz
-    from datetime import datetime as _dt, timedelta as _td
-
-    ist = _pytz.timezone("Asia/Kolkata")
-    today = _dt.now(ist).strftime("%d-%m-%Y")
-
-    # Strip command prefix
-    body = _re.sub(r"^/di\s*", "", text, flags=_re.IGNORECASE).strip()
-    if not body:
-        return None
-
-    # Extract time range: -t HH:MM AM/PM - HH:MM AM/PM
-    # Flexible: space or no-space between time and AM/PM
-    t_match = _re.search(
-        r"-t\s+(\d{1,2}:\d{2})\s*([AaPp][Mm])\s*-\s*(\d{1,2}:\d{2})\s*([AaPp][Mm])",
-        body,
-    )
-    if not t_match:
-        return None
-
-    start_time   = t_match.group(1)
-    start_ampm   = t_match.group(2).upper()
-    end_time     = t_match.group(3)
-    end_ampm     = t_match.group(4).upper()
-
-    # Convert to 24-hour format (HH:MM)
-    def _to_24h(t, ap):
-        h, m = map(int, t.split(":"))
-        if ap == "PM" and h != 12:
-            h += 12
-        elif ap == "AM" and h == 12:
-            h = 0
-        return f"{h:02d}:{m:02d}"
-
-    h24_start = _to_24h(start_time, start_ampm)
-    h24_end   = _to_24h(end_time,   end_ampm)
-
-    # Build IST datetime objects for today
-    try:
-        begin_dt = _dt.strptime(f"{today} {start_time} {start_ampm}", "%d-%m-%Y %I:%M %p")
-        begin_dt = ist.localize(begin_dt)
-        end_dt   = _dt.strptime(f"{today} {end_time} {end_ampm}", "%d-%m-%Y %I:%M %p")
-        end_dt   = ist.localize(end_dt)
-    except Exception:
-        return None
-
-    # If end <= begin, end is next day
-    if end_dt <= begin_dt:
-        end_dt += _td(days=1)
-
-    begin_ts   = int(begin_dt.timestamp())
-    end_ts     = int(end_dt.timestamp())
-    duration_sec = end_ts - begin_ts
-    if duration_sec <= 0 or duration_sec > 24 * 3600:
-        return None
-
-    # Remove the time portion from body to isolate channel + filename
-    body_no_time = body[:t_match.start()].strip() + " " + body[t_match.end():].strip()
-    body_no_time = body_no_time.strip()
-
-    # Last token = filename (must contain .mkv or .mp4, else default)
-    parts = body_no_time.split()
-    if not parts:
-        return None
-
-    # Heuristic: last token with an extension is filename
-    filename = None
-    channel_tokens = parts
-    for i in range(len(parts) - 1, -1, -1):
-        p = parts[i]
-        if "." in p and len(p.split(".")[-1]) <= 4:
-            filename = p
-            channel_tokens = parts[:i]
-            break
-
-    if not filename:
-        # No filename found — default to channel name + .mkv
-        channel_tokens = parts
-        filename = "catchup.mkv"
-
-    channel = " ".join(channel_tokens).strip()
-    if not channel:
-        return None
-
-    return {
-        "channel":       channel,
-        "begin_ts":      begin_ts,
-        "end_ts":        end_ts,
-        "duration_sec":  duration_sec,
-        "filename":      filename,
-        "h24_start":     h24_start,
-        "h24_end":       h24_end,
-        "today":         today,
-        "start_str":     f"{start_time} {start_ampm}",
-        "end_str":       f"{end_time} {end_ampm}",
-    }
-
-
-async def _di_proxy_fetch(channel_id: str, h24_start: str, h24_end: str,
-                          ch_label: str, tmp_dir: str) -> str | None:
-    """
-    Fetch HLS stream via jitendraunatti's public JioTV proxy and record with FFmpeg.
-    Returns output file path on success, None on failure.
-    """
-    proxy_url = (
-        "https://tvjio.iptvbd.xyz"
-        f"/{channel_id}"
-        f"_{h24_start.replace(':', '')}"
-        f"_{h24_end.replace(':', '')}"
-        ".mp4"                        # proxy always returns MP4/HLS container
-    )
-
-    out_file = os.path.join(tmp_dir, "catchup_proxy.mkv")
-    ffmpeg_cmd = [
-        "ffmpeg", "-y",
-        "-headers", "User-Agent: Mozilla/5.0 (Linux; Android 10; K)\r\n",
-        "-i", proxy_url,
-        "-c", "copy",
-        "-f", "matroska",
-        "-avoid_negative_ts", "make_zero",
-        out_file,
+async def start_recording(stream_url: str, duration_seconds: int, output_path: str,
+                          cancel_id: str, cookie: str = "", user_agent: str = "",
+                          license_url: str = "", quality: str = "1080p",
+                          aspect: str = "16:9", audio_index: int = 0,
+                          audio_mode: str = DEFAULT_AUDIO_MODE,
+                          audio_tracks: list | None = None,
+                          cenc_key: str = "",
+                          key_stream_url: str = "",
+                          watermark_path: str = "",
+                          airtel_overlay: bool = False,
+                          ott_watermark: bool = False,
+                          dishtv_channel: bool = True):
+    """Start FFmpeg as a non-blocking subprocess. Returns (proc, progress_file)."""
+    progress_file = f"/tmp/ffmpeg_prog_{cancel_id}.txt"
+    # Live feeds can contain incomplete segments or temporarily corrupt packets.
+    # FFmpeg must fail promptly; the outer recording job handles one fresh
+    # signed-stream retry instead of reconnecting inside this process.
+    live_input_options = [
+        "-fflags", "+discardcorrupt+genpts",
+        "-analyzeduration", "10M",
+        "-probesize", "10M",
+        "-thread_queue_size", "4096",
+        # Do not let a stalled CDN segment hold a short recording for minutes.
+        "-rw_timeout", "8000000",
     ]
+    cmd = ["ffmpeg", "-hide_banner", "-y"]
+    if cookie or user_agent:
+        header_str = ""
+        if cookie:
+            header_str += f"Cookie: {cookie}\r\n"
+        if user_agent:
+            header_str += f"User-Agent: {user_agent}\r\n"
+        cmd += ["-headers", header_str]
+    if user_agent:
+        cmd += ["-user_agent", user_agent]
+    if cookie:
+        cmd += ["-cookies", cookie]
+    if cenc_key:
+        cmd += ["-cenc_decryption_key", cenc_key]
+    elif license_url:
+        key_hex = await asyncio.get_event_loop().run_in_executor(
+            None, _fetch_cenc_key, key_stream_url or stream_url,
+            license_url, cookie, user_agent
+        )
+        if key_hex:
+            cmd += ["-cenc_decryption_key", key_hex]
+
+    input_options = list(live_input_options)
+    if os.path.isfile(stream_url):
+        # A trimmed local MPD still references the signed HTTPS media
+        # segments through BaseURL. Allow both the local manifest and its
+        # remote DASH children.
+        cmd += [
+            "-protocol_whitelist",
+            "file,https,tcp,tls,crypto,data",
+        ]
+    else:
+        input_options = live_input_options
+
+    watermark_input = ""   # WM1: Cew1rV1.png — DishTV only
+    watermark2_input = ""  # WM2: CuMJCjn.md.png — last 2 min only, configurable position
+    dishtv_last2min = False
+    ott_watermark_input = ""
+    ott_watermark_last2min = False
+    # Airtel/Sun NXT use the shared watermark settings, without entering any
+    # DishTV watermark branch below.
+    if ott_watermark:
+        # The OTT menu owns watermark behavior for both providers. In
+        # particular, Disable must also suppress the legacy Airtel overlay.
+        airtel_overlay = False
+        ott_settings = get_ott_watermark_settings()
+        if ott_settings.get("enabled", True):
+            ott_url = ott_settings.get("custom_url") or OTT_WATERMARK_URL
+            ott_watermark_last2min = bool(ott_settings.get("last_2min", True))
+            ott_cache_file = _ott_watermark_cache_file(ott_url)
+            ott_watermark_input = await asyncio.get_running_loop().run_in_executor(
+                None, _get_watermark_input, ott_url, ott_cache_file
+            )
+    # Preserve the existing Airtel overlay path for callers that do not opt
+    # into the new OTT watermark menu.
+    elif airtel_overlay:
+        overlay_local = await asyncio.get_running_loop().run_in_executor(
+            None, _get_watermark_input, AIRTEL_LAST2MIN_OVERLAY_URL, AIRTEL_LAST2MIN_OVERLAY_URL
+        )
+    elif dishtv_channel:
+        overlay_local = ""
+        # WM1 is always downloaded for DishTV regardless of settings
+        watermark_input = await asyncio.get_running_loop().run_in_executor(
+            None, _get_watermark_input
+        )
+        # WM2 only when last_2min is enabled in settings
+        wm_settings = get_watermark_settings()
+        dishtv_last2min = wm_settings.get("last_2min", False)
+        if dishtv_last2min:
+            wm2_url = wm_settings.get("custom_url") or DISHTV_WM2_URL
+            watermark2_input = await asyncio.get_running_loop().run_in_executor(
+                None, _get_watermark_input, wm2_url, wm2_url
+            )
+    else:
+        # Direct recordings without a known DishTV provider must not receive
+        # the DishTV watermark or any provider-specific overlay.
+        overlay_local = ""
+
+    # DishTV keeps its existing 576p path. OTT quality buttons control only
+    # Airtel/Sun NXT output dimensions.
+    height = (
+        {"480p": 480, "720p": 720, "1080p": 1080}.get(quality, 576)
+        if ott_watermark else 576
+    )
+    video_bitrate, audio_bitrate = _recording_bitrates(
+        duration_seconds, audio_mode, audio_tracks
+    )
+    if ott_watermark and ott_watermark_input:
+        overlay_start = max(0, duration_seconds - 120)
+        ott_settings = get_ott_watermark_settings()
+        watermark_mode = ott_settings["mode"]
+        watermark_offset = ott_settings["offset"]
+        if watermark_mode == "top_center":
+            watermark_xy = "(W-w)/2:60"
+        elif watermark_mode == "center":
+            watermark_xy = "(W-w)/2:(H-h)/2"
+        elif watermark_mode == "left_bottom":
+            watermark_xy = "20:H-h-20"
+        elif watermark_mode == "right":
+            watermark_xy = f"W-w-{watermark_offset}:H-h-20"
+        else:
+            watermark_xy = f"{watermark_offset}:H-h-20"
+        if aspect == "4:6":
+            base_filter = (
+                f"[0:v:0]crop=ih*2/3:ih:(iw-ih*2/3)/2:0,"
+                f"scale=-2:{height}[base]"
+            )
+        else:
+            base_filter = f"[0:v:0]scale=-2:{height}[base]"
+        audio_options = _audio_options(audio_mode, audio_index, audio_tracks)
+        enable_expr = (
+            f":enable='gte(t,{overlay_start})'"
+            if ott_watermark_last2min else ""
+        )
+        cmd += [
+            *input_options,
+            "-i", stream_url,
+            "-loop", "1", "-i", ott_watermark_input,
+            "-t", str(duration_seconds),
+            "-filter_complex",
+            (
+                f"{base_filter};"
+                f"[1:v]scale=160:-1[wm];"
+                f"[base][wm]overlay={watermark_xy}{enable_expr}[outv]"
+            ),
+            "-map", "[outv]",
+            *audio_options,
+            "-map", "0:s?", "-map", "0:t?",
+            "-c:s", "copy", "-c:t", "copy",
+            "-map_metadata", "0", "-map_chapters", "0",
+            "-c:v", "libx264", "-b:v", video_bitrate,
+            "-maxrate", video_bitrate, "-bufsize", f"{int(video_bitrate[:-1]) * 2}k",
+            "-preset", "veryfast",
+            "-pix_fmt", "yuv420p",
+            "-fps_mode", "cfr", "-r", "25",
+            "-profile:v", "high", "-level:v", "4.1",
+            "-c:a", "aac",
+            "-b:a", audio_bitrate,
+            "-ar", "48000", "-ac", "2",
+            "-avoid_negative_ts", "make_zero",
+            "-max_muxing_queue_size", "4096",
+            "-movflags", "+faststart+use_metadata_tags",
+            "-progress", progress_file,
+            output_path,
+        ]
+    elif airtel_overlay and overlay_local:
+        # Show the overlay image only during the last 2 minutes of the recording.
+        # If the recording is ≤ 2 min the overlay shows for the whole clip.
+        overlay_start = max(0, duration_seconds - 120)
+        if aspect == "4:6":
+            base_filter = (
+                f"[0:v:0]crop=ih*2/3:ih:(iw-ih*2/3)/2:0,"
+                f"scale=-2:{height}[base]"
+            )
+        else:
+            base_filter = f"[0:v:0]scale=-2:{height}[base]"
+        audio_options = _audio_options(audio_mode, audio_index, audio_tracks)
+        cmd += [
+            *input_options,
+            "-i", stream_url,
+            "-loop", "1",
+            "-i", overlay_local,
+            "-t", str(duration_seconds),
+            "-filter_complex",
+            (
+                f"{base_filter};"
+                f"[1:v]scale=240:-1[wm];"
+                f"[base][wm]overlay=(W-w)/2:60:enable='gte(t,{overlay_start})'[outv]"
+            ),
+            "-map", "[outv]",
+            *audio_options,
+            "-map", "0:s?", "-map", "0:t?",
+            "-c:s", "copy", "-c:t", "copy",
+            "-map_metadata", "0", "-map_chapters", "0",
+            "-c:v", "libx264", "-b:v", video_bitrate,
+            "-maxrate", video_bitrate, "-bufsize", f"{int(video_bitrate[:-1]) * 2}k",
+            "-preset", "veryfast",
+            "-pix_fmt", "yuv420p",
+            "-fps_mode", "cfr", "-r", "25",
+            "-profile:v", "high", "-level:v", "4.1",
+            "-c:a", "aac",
+            "-b:a", audio_bitrate,
+            "-ar", "48000", "-ac", "2",
+            "-avoid_negative_ts", "make_zero",
+            "-max_muxing_queue_size", "4096",
+            "-movflags", "+faststart+use_metadata_tags",
+            "-progress", progress_file,
+            output_path,
+        ]
+    elif watermark_input and watermark2_input:
+        # DishTV — WM1 (Cew1rV1.png) full video fixed bottom-right
+        #        + WM2 (CuMJCjn.md.png) last-2-min configurable position
+        last2_start = max(0, duration_seconds - 120)
+        watermark_mode, watermark_offset = get_watermark_position()
+        if watermark_mode == "top_center":
+            wm2_scale = 160
+            wm2_xy = "(W-w)/2:60"
+        elif watermark_mode == "center":
+            wm2_scale = 160
+            wm2_xy = "(W-w)/2:(H-h)/2"
+        elif watermark_mode == "left_bottom":
+            wm2_scale = 160
+            wm2_xy = "20:H-h-20"
+        elif watermark_mode == "right":
+            wm2_scale = 100
+            wm2_xy = f"main_w-overlay_w-{watermark_offset}:main_h-overlay_h-20"
+        else:
+            wm2_scale = 100
+            wm2_xy = f"{watermark_offset}:main_h-overlay_h-20"
+        if aspect == "4:6":
+            base_filter = (
+                f"[0:v:0]crop=ih*2/3:ih:(iw-ih*2/3)/2:0,"
+                f"scale=-2:{height}[base]"
+            )
+        else:
+            base_filter = f"[0:v:0]scale=-2:{height}[base]"
+        audio_options = _audio_options(audio_mode, audio_index, audio_tracks)
+        cmd += [
+            *input_options,
+            "-i", stream_url,
+            "-loop", "1", "-i", watermark_input,
+            "-loop", "1", "-i", watermark2_input,
+            "-t", str(duration_seconds),
+            "-filter_complex",
+            (
+                f"{base_filter};"
+                f"[1:v]scale=100:-1[wm1];"
+                f"[base][wm1]overlay=main_w-overlay_w-60:main_h-overlay_h-20[base_wm];"
+                f"[2:v]scale={wm2_scale}:-1[wm2];"
+                f"[base_wm][wm2]overlay={wm2_xy}:enable='gte(t,{last2_start})'[outv]"
+            ),
+            "-map", "[outv]",
+            *audio_options,
+            "-map", "0:s?", "-map", "0:t?",
+            "-c:s", "copy", "-c:t", "copy",
+            "-map_metadata", "0", "-map_chapters", "0",
+            "-c:v", "libx264", "-b:v", video_bitrate,
+            "-maxrate", video_bitrate, "-bufsize", f"{int(video_bitrate[:-1]) * 2}k",
+            "-preset", "veryfast",
+            "-pix_fmt", "yuv420p",
+            "-fps_mode", "cfr", "-r", "25",
+            "-profile:v", "high", "-level:v", "4.1",
+            "-c:a", "aac",
+            "-b:a", audio_bitrate,
+            "-ar", "48000", "-ac", "2",
+            "-avoid_negative_ts", "make_zero",
+            "-max_muxing_queue_size", "4096",
+            "-movflags", "+faststart+use_metadata_tags",
+            "-progress", progress_file,
+            output_path,
+        ]
+    elif watermark_input:
+        # DishTV — WM1 (Cew1rV1.png) only, full video, fixed 100px bottom-right
+        if aspect == "4:6":
+            base_filter = (
+                f"[0:v:0]crop=ih*2/3:ih:(iw-ih*2/3)/2:0,"
+                f"scale=-2:{height}[base]"
+            )
+        else:
+            base_filter = f"[0:v:0]scale=-2:{height}[base]"
+        audio_options = _audio_options(audio_mode, audio_index, audio_tracks)
+        cmd += [
+            *input_options,
+            "-i", stream_url,
+            "-loop", "1", "-i", watermark_input,
+            "-t", str(duration_seconds),
+            "-filter_complex",
+            (
+                f"{base_filter};"
+                f"[1:v]scale=100:-1[wm1];"
+                f"[base][wm1]overlay=main_w-overlay_w-60:main_h-overlay_h-20[outv]"
+            ),
+            "-map", "[outv]",
+            *audio_options,
+            "-map", "0:s?", "-map", "0:t?",
+            "-c:s", "copy", "-c:t", "copy",
+            "-map_metadata", "0", "-map_chapters", "0",
+            "-c:v", "libx264", "-b:v", video_bitrate,
+            "-maxrate", video_bitrate, "-bufsize", f"{int(video_bitrate[:-1]) * 2}k",
+            "-preset", "veryfast",
+            "-pix_fmt", "yuv420p",
+            "-fps_mode", "cfr", "-r", "25",
+            "-profile:v", "high", "-level:v", "4.1",
+            "-c:a", "aac",
+            "-b:a", audio_bitrate,
+            "-ar", "48000", "-ac", "2",
+            "-avoid_negative_ts", "make_zero",
+            "-max_muxing_queue_size", "4096",
+            "-movflags", "+faststart+use_metadata_tags",
+            "-progress", progress_file,
+            output_path,
+        ]
+    else:
+        audio_options = _audio_options(audio_mode, audio_index, audio_tracks)
+        video_filter = (
+            f"crop=ih*2/3:ih:(iw-ih*2/3)/2:0,scale=-2:{height}"
+            if aspect == "4:6" else f"scale=-2:{height}"
+        )
+        cmd += [
+            *input_options,
+            "-i", stream_url,
+            "-t", str(duration_seconds),
+            "-map", "0:v:0",
+            *audio_options,
+            "-map", "0:s?", "-map", "0:t?",
+            "-c:s", "copy", "-c:t", "copy",
+            "-map_metadata", "0", "-map_chapters", "0",
+            "-vf", video_filter,
+            "-c:v", "libx264", "-b:v", video_bitrate,
+            "-maxrate", video_bitrate, "-bufsize", f"{int(video_bitrate[:-1]) * 2}k",
+            "-preset", "veryfast",
+            "-pix_fmt", "yuv420p",
+            "-fps_mode", "cfr", "-r", "25",
+            "-profile:v", "high", "-level:v", "4.1",
+            "-c:a", "aac",
+            "-b:a", audio_bitrate,
+            "-ar", "48000", "-ac", "2",
+            "-avoid_negative_ts", "make_zero",
+            "-max_muxing_queue_size", "4096",
+            "-movflags", "+faststart+use_metadata_tags",
+            "-progress", progress_file,
+            output_path,
+        ]
+
+    probe_args = []
+    if cookie or user_agent:
+        probe_headers = ""
+        if cookie:
+            probe_headers += f"Cookie: {cookie}\r\n"
+        if user_agent:
+            probe_headers += f"User-Agent: {user_agent}\r\n"
+        probe_args += ["-headers", probe_headers]
+    if user_agent:
+        probe_args += ["-user_agent", user_agent]
+    if cookie:
+        probe_args += ["-cookies", cookie]
+    selected_audio = (
+        [int(track.get("index", ordinal)) for ordinal, track in enumerate(audio_tracks)]
+        if audio_mode == "multi" and audio_tracks
+        else None
+        if audio_mode == "multi"
+        else [max(0, int(audio_index))]
+    )
+    metadata = await build_ffmpeg_metadata(
+        stream_url,
+        probe_args=probe_args,
+        selected_streams={
+            "video": [0],
+            "audio": selected_audio,
+            "subtitle": None,
+        },
+    )
+    cmd[-1:-1] = metadata
 
     proc = await asyncio.create_subprocess_exec(
-        *ffmpeg_cmd,
-        stdout=asyncio.subprocess.PIPE,
+        *cmd,
+        stdout=asyncio.subprocess.DEVNULL,
         stderr=asyncio.subprocess.PIPE,
     )
-    _, stderr = await proc.communicate()
-
-    if proc.returncode != 0 or not os.path.exists(out_file) or os.path.getsize(out_file) < 1024:
-        err = (stderr or b"").decode(errors="ignore")[-300:]
-        LOG.warning("di proxy ffmpeg failed for %s: %s", ch_label, err)
-        return None
-    return out_file
+    return proc, progress_file
 
 
-@app.on_message(filters.command(["di", "DI"]) & AUTH)
-async def di_catchup_cmd(client: Client, message: Message):
-    """
-    /di <channel> -t HH:MM AM/PM - HH:MM AM/PM <filename.mkv>
-    Quick JioTV catchup for today using public proxy or native API.
-    """
-    uid = message.from_user.id
-
-    if uid in user_tasks:
-        return await message.reply_text(
-            "⏳ Tumhara ek kaam chal raha hai. Pehle /cancelme karo."
-        )
-
-    parsed = _parse_di_command(message.text or "")
-    if not parsed:
-        return await message.reply_text(
-            "❌ **Syntax galat hai.**\n\n"
-            "**Format:**\n"
-            "`/di <channel> -t HH:MM AM/PM - HH:MM AM/PM <filename.mkv>`\n\n"
-            "**Example:**\n"
-            "`/di Pogo -t 12:00PM - 01:00PM ls.mkv`\n"
-            "`/di Star Plus -t 09:00 AM - 11:00 AM morning_show.mkv`\n\n"
-            "• Time 12-hour AM/PM format mein\n"
-            "• Date aaj ki auto-pick hoti hai\n"
-            "• Output MKV format mein"
-        )
-
-    ch_name      = parsed["channel"]
-    begin_ts     = parsed["begin_ts"]
-    end_ts       = parsed["end_ts"]
-    duration_sec = parsed["duration_sec"]
-    filename     = re.sub(r"[^\w\s.-]", "", parsed["filename"]).strip() or "catchup.mkv"
-    if not filename.lower().endswith(".mkv"):
-        filename += ".mkv"
-
-    dur_label = _seconds_to_hms(duration_sec)
-
-    status = await message.reply_text(
-        f"🔍 **Quick Catchup — {ch_name}**\n"
-        f"📅 Date: `{parsed['today']}`\n"
-        f"🕐 Time: `{parsed['start_str']} → {parsed['end_str']}`\n"
-        f"⏱ Duration: `{dur_label}`\n"
-        f"⏳ Channel search kar raha hoon…"
-    )
-
-    # ---- login check ----
-    if not jiotv.is_logged_in():
-        return await status.edit_text(
-            "❌ JioTV login nahi hai.\n"
-            "Admin se kaho: `/login <phone>`"
-        )
-
-    # ---- channel search ----
-    matches = await asyncio.get_event_loop().run_in_executor(
-        None, jiotv.search_channel, ch_name
-    )
-    if not matches:
-        return await status.edit_text(
-            f"❌ Channel **{ch_name}** nahi mila.\n\n"
-            f"`/channels {ch_name}` se list dekho."
-        )
-
-    matched = matches[0]
-    ch_id    = str(matched.get("id") or matched.get("channelId") or matched.get("channel_id") or "")
-    ch_label = matched.get("name") or matched.get("channelName") or ch_name
-
-    await status.edit_text(
-        f"📡 **{ch_label}** mila!\n"
-        f"⏳ Catchup URL fetch kar raha hoon…"
-    )
-
-    # ---- tier limits (same as /dl) ----
-    is_owner   = uid in OWNER_IDS
-    _dl_premium = is_premium(uid)
-    _trimmed    = False
-    if not is_owner:
-        if _dl_premium:
-            if duration_sec > 3600:
-                return await status.edit_text(
-                    "⏱ **Premium plan:** Max **1 hour** per catchup.\n"
-                    f"You requested: `{dur_label}`\n\n"
-                    "Time range chhota karo."
-                )
-        else:
-            if duration_sec > 120:
-                end_ts       = begin_ts + 120
-                duration_sec = 120
-                _trimmed     = True
-                dur_label    = _seconds_to_hms(duration_sec)
-
-    # ---- get catchup URL via JioTV API ----
-    result = await asyncio.get_event_loop().run_in_executor(
-        None, jiotv.get_catchup_url, ch_id, begin_ts, end_ts
-    )
-
-    import tempfile
-    tmp_dir  = tempfile.mkdtemp(prefix="di_")
-    out_file = os.path.join(tmp_dir, filename)
-
-    stream_url = None
-    if result.get("success") and result.get("url"):
-        stream_url = result["url"]
-        LOG.info("di: native JioTV catchup URL OK for %s", ch_label)
-    else:
-        LOG.info("di: native JioTV failed (%s), trying proxy fallback", result.get("message"))
-
-    user_tasks[uid] = {"status": "di_catchup", "cancel": False}
-
+async def validate_recording_file(path: str) -> tuple[bool, str]:
+    """Decode the complete output before upload so broken MP4s never reach Telegram."""
+    if not os.path.exists(path) or os.path.getsize(path) < 1024:
+        return False, "Output file missing or empty."
+    cmd = [
+        "ffmpeg", "-hide_banner", "-v", "error", "-xerror",
+        "-i", path,
+        "-map", "0:v:0", "-map", "0:a:0?",
+        "-f", "null", "-",
+    ]
     try:
-        # ---- Method 1: Native JioTV API stream ----
-        if stream_url:
-            await status.edit_text(
-                f"✅ Native stream mila!\n"
-                f"📅 `{parsed['today']}` | 🕐 `{parsed['start_str']} → {parsed['end_str']}`\n"
-                f"📺 **{ch_label}**\n"
-                f"⏱ `{dur_label}`\n"
-                f"📥 Recording shuru…"
-                + (
-                    "\n⚠️ Free limit: 2 min trim"
-                    if _trimmed else ""
-                )
-            )
-
-            ffmpeg_cmd = [
-                "ffmpeg", "-y",
-                "-headers", "User-Agent: Mozilla/5.0\r\n",
-                "-i", stream_url,
-                "-t", str(duration_sec),
-                "-c", "copy",
-                "-f", "matroska",
-                "-avoid_negative_ts", "make_zero",
-                out_file,
-            ]
-
-            proc = await asyncio.create_subprocess_exec(
-                *ffmpeg_cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-
-            # Progress updater
-            async def _di_progress():
-                last_edit = time.time()
-                bar_chars = 10
-                elapsed   = 0
-                while proc.returncode is None:
-                    await asyncio.sleep(5)
-                    elapsed += 5
-                    if user_tasks.get(uid, {}).get("cancel"):
-                        proc.kill()
-                        break
-                    if time.time() - last_edit >= 10:
-                        pct    = min(int((elapsed / duration_sec) * 100), 99) if duration_sec > 0 else 0
-                        filled = int(pct / 100 * bar_chars)
-                        bar    = "█" * filled + "░" * (bar_chars - filled)
-                        try:
-                            await status.edit_text(
-                                f"📥 **Recording…** `{ch_label}`\n"
-                                f"[{bar}] {pct}%\n"
-                                f"⏱ Elapsed: `{_seconds_to_hms(elapsed)}` / `{dur_label}`"
-                            )
-                        except Exception:
-                            pass
-                        last_edit = time.time()
-
-            asyncio.get_event_loop().create_task(_di_progress())
-            _, stderr = await proc.communicate()
-
-            if user_tasks.get(uid, {}).get("cancel"):
-                await status.edit_text("❌ Cancelled.")
-                user_tasks.pop(uid, None)
-                shutil.rmtree(tmp_dir, ignore_errors=True)
-                return
-
-            if proc.returncode != 0 or not os.path.exists(out_file) or os.path.getsize(out_file) < 1024:
-                err_text = (stderr or b"").decode(errors="ignore")[-300:]
-                LOG.warning("di native ffmpeg failed: %s", err_text)
-                stream_url = None   # fallback to proxy
-            else:
-                # Success with native
-                file_size_mb = os.path.getsize(out_file) / (1024 * 1024)
-                await status.edit_text(
-                    f"✅ Recording complete!\n"
-                    f"📁 Size: `{file_size_mb:.1f} MB`\n"
-                    f"📤 Upload ho raha hai…"
-                )
-
-        # ---- Method 2: Proxy fallback ----
-        if not stream_url or not os.path.exists(out_file) or os.path.getsize(out_file) < 1024:
-            await status.edit_text(
-                f"⏳ Native stream fail ho gaya.\n"
-                f"🔗 Proxy se try kar raha hoon…\n"
-                f"📺 **{ch_label}** | ⏱ `{dur_label}`"
-            )
-            proxy_file = await _di_proxy_fetch(
-                ch_id, parsed["h24_start"], parsed["h24_end"],
-                ch_label, tmp_dir
-            )
-            if proxy_file:
-                out_file = proxy_file
-            else:
-                return await status.edit_text(
-                    "❌ **Dono methods fail ho gaye.**\n\n"
-                    "Shayad:\n"
-                    "• Catchup is time range mein available nahi\n"
-                    "• Token expire ho gaya — `/login` se dobara login karo\n"
-                    "• Channel DRM protected hai"
-                )
-
-        # ---- Upload ----
-        if os.path.exists(out_file) and os.path.getsize(out_file) >= 1024:
-            file_size_mb = os.path.getsize(out_file) / (1024 * 1024)
-            caption = (
-                f"📺 **{ch_label}** — Catchup\n"
-                f"📅 `{parsed['today']}` | 🕐 `{parsed['start_str']} → {parsed['end_str']}`\n"
-                f"⏱ `{dur_label}` | 📡 JioTV\n"
-                f"🎥 {get_default_watermark()}"
-            )
-            try:
-                await message.reply_document(
-                    document=out_file,
-                    caption=caption,
-                    file_name=filename,
-                )
-                await status.delete()
-            except Exception as up_err:
-                LOG.warning("di upload failed: %s", up_err)
-                await status.edit_text(f"❌ Upload failed: `{up_err}`")
-        else:
-            await status.edit_text("❌ File empty ya missing hai.")
-
-    except Exception as e:
-        LOG.exception("di_catchup_cmd error uid=%s: %s", uid, e)
-        try:
-            await status.edit_text(f"❌ Error: `{e}`")
-        except Exception:
-            pass
-    finally:
-        user_tasks.pop(uid, None)
-        try:
-            shutil.rmtree(tmp_dir, ignore_errors=True)
-        except Exception:
-            pass
-
-
-@app.on_message(filters.command(["dl", "DL"]) & AUTH)
-async def dl_catchup_cmd(client: Client, message: Message):
-    """
-    /dl -Jiotv -c Channel -t DD-MM-YYYY HH:MM AM/PM - HH:MM AM/PM -n Filename
-    Downloads a JioTV catchup recording and sends it.
-    """
-    uid = message.from_user.id
-    status = None
-
-    # --- check for active job ---
-    if uid in user_tasks:
-        return await message.reply_text(
-            "⏳ Tumhara ek kaam chal raha hai. Pehle /cancelme karo."
-        )
-
-    # --- parse ---
-    parsed = _parse_dl_command(message.text or "")
-    if not parsed:
-        return await message.reply_text(
-            "❌ **Syntax galat hai.**\n\n"
-            "**JioTV:**\n"
-            "`/dl -Jiotv -c ChannelName -t DD-MM-YYYY HH:MM AM/PM - HH:MM AM/PM -n File`\n\n"
-            "**Example:**\n"
-            "`/dl -Jiotv -c Star Plus -t 02-07-2026 09:00 AM - 11:00 AM -n StarPlus_Morning`\n"
-        )
-
-    source       = parsed["source"]
-    ch_name      = parsed["channel"]
-    begin_ts     = parsed["begin_ts"]
-    end_ts       = parsed["end_ts"]
-    duration_sec = parsed["duration_sec"]
-    out_filename = re.sub(r"[^\w\s-]", "", parsed["filename"]).strip().replace(" ", "_") or "catchup"
-
-    # --- Tier-based /dl limits ---
-    # Owner: unlimited | Premium: max 1 hour | Free/Verified: max 2 min (auto-trim)
-    is_owner   = uid in OWNER_IDS
-    _dl_premium = is_premium(uid)
-    _trimmed    = False
-    if not is_owner:
-        if _dl_premium:
-            if duration_sec > 3600:
-                return await message.reply_text(
-                    "⏱ **Premium plan:** Maximum **1 hour** per `/dl` download.\n"
-                    f"You requested: `{_seconds_to_hms(duration_sec)}`\n\n"
-                    "Shorten your time range and try again."
-                )
-        else:
-            if duration_sec > 120:
-                # Auto-trim to 2 minutes instead of rejecting
-                end_ts       = begin_ts + 120
-                duration_sec = 120
-                _trimmed     = True
-
-    dur_label = _seconds_to_hms(duration_sec)
-    src_label = "JioTV"
-
-    status = await message.reply_text(
-        f"🔍 **{src_label} Catchup**\n"
-        f"📺 Channel: `{ch_name}`\n"
-        f"📅 Date: `{parsed['date_str']}`\n"
-        f"🕐 Time: `{parsed['start_time']} → {parsed['end_time']}`\n"
-        f"⏱ Duration: `{dur_label}`" + (
-            "\n⚠️ **Free/Verified limit:** trimmed to 2 minutes.\n"
-            "Use `/contact` to upgrade for longer downloads."
-            if _trimmed else ""
-        ) + "\n\n"
-        f"⏳ Channel search kar raha hoon…"
-    )
-
-    # --- channel lookup ---
-    if source == "jiotv":
-        if not jiotv.is_logged_in():
-            return await status.edit_text(
-                "❌ JioTV login nahi hai.\n"
-                "Admin se kaho: `/jiotvlogin <phone>`"
-            )
-        matches = await asyncio.get_event_loop().run_in_executor(
-            None, jiotv.search_channel, ch_name
-        )
-
-
-    if not matches:
-        return await status.edit_text(
-            f"❌ Channel **{ch_name}** nahi mila.\n\n"
-            f"Check: `/channels` se list dekho."
-        )
-
-    matched = matches[0]
-    ch_id    = str(matched.get("id") or matched.get("channelId") or matched.get("channel_id") or "")
-    ch_label = matched.get("name") or matched.get("channelName") or ch_name
-
-    await status.edit_text(
-        f"📡 **{ch_label}** mila!\n"
-        f"⏳ Catchup stream URL fetch kar raha hoon…"
-    )
-
-    # --- get catchup URL ---
-    if source == "jiotv":
-        result = await asyncio.get_event_loop().run_in_executor(
-            None, jiotv.get_catchup_url, ch_id, begin_ts, end_ts
-        )
-
-
-    if not result.get("success"):
-        return await status.edit_text(
-            f"❌ **Catchup URL nahi mila:**\n{result.get('message', 'Unknown error')}\n\n"
-            f"Possible reasons:\n"
-            f"• Channel mein catchup available nahi\n"
-            f"• Token expire ho gaya (dobara login karo)\n"
-            f"• Time range bohot purana hai (7 days max)"
-        )
-
-    stream_url = result["url"]
-    is_drm     = result.get("drm", False)
-
-    if is_drm:
-        return await status.edit_text(
-            f"⚠️ **{ch_label}** — Widevine DRM protected hai.\n\n"
-            f"Is channel ka catchup direct download nahi ho sakta.\n"
-            f"DRM-free channels ka use karo ya JioTV try karo."
-        )
-
-    # --- ffmpeg download ---
-    await status.edit_text(
-        f"✅ Stream URL mila!\n"
-        f"📥 **{ch_label}** ka catchup download ho raha hai…\n"
-        f"⏱ Duration: `{dur_label}`\n"
-        f"📅 `{parsed['date_str']} {parsed['start_time']} → {parsed['end_time']}`"
-    )
-
-    import tempfile
-    tmp_dir  = tempfile.mkdtemp(prefix="catchup_")
-    out_file = os.path.join(tmp_dir, f"{out_filename}.mp4")
-
-    user_tasks[uid] = {"status": "catchup_dl", "cancel": False}
-
-    try:
-        ffmpeg_cmd = [
-            "ffmpeg", "-y",
-            "-headers", "User-Agent: Mozilla/5.0\r\n",
-            "-i", stream_url,
-            "-t", str(duration_sec),
-            "-c", "copy",
-            "-avoid_negative_ts", "make_zero",
-            "-movflags", "+faststart",
-            out_file,
-        ]
-
         proc = await asyncio.create_subprocess_exec(
-            *ffmpeg_cmd,
-            stdout=asyncio.subprocess.PIPE,
+            *cmd, stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.PIPE,
         )
+        _, stderr = await asyncio.wait_for(proc.communicate(), timeout=180)
+        if proc.returncode == 0:
+            return True, ""
+        return False, stderr.decode(errors="replace")[-1200:]
+    except asyncio.TimeoutError:
+        proc.kill()
+        await proc.wait()
+        return False, "Output validation timed out."
+    except OSError as exc:
+        return False, str(exc)
 
-        # Progress updater
-        async def _dl_progress():
-            last_edit = time.time()
-            bar_chars = 10
-            elapsed   = 0
-            while proc.returncode is None:
-                await asyncio.sleep(5)
-                elapsed += 5
-                if user_tasks.get(uid, {}).get("cancel"):
-                    proc.kill()
-                    break
-                if time.time() - last_edit >= 10:
-                    pct    = min(int((elapsed / duration_sec) * 100), 99) if duration_sec > 0 else 0
-                    filled = int(pct / 100 * bar_chars)
-                    bar    = "█" * filled + "░" * (bar_chars - filled)
+
+async def _generate_recording_thumbnail(
+    input_path: str, output_path: str, duration_seconds: int
+) -> str:
+    """Generate a small Telegram-compatible JPEG thumbnail from a recording."""
+    seek_seconds = max(0, int(duration_seconds) - 5)
+    cmd = [
+        "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+        "-ss", str(seek_seconds),
+        "-i", input_path,
+        "-frames:v", "1",
+        "-vf", "scale=640:-2",
+        "-q:v", "2",
+        "-an",
+        output_path,
+    ]
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        _, stderr = await asyncio.wait_for(proc.communicate(), timeout=60)
+        if proc.returncode == 0 and os.path.exists(output_path):
+            return output_path
+        logger.warning(
+            "Recording thumbnail generation failed: %s",
+            stderr.decode(errors="replace")[-500:],
+        )
+    except (asyncio.TimeoutError, OSError) as exc:
+        logger.warning("Recording thumbnail generation failed: %s", exc)
+        try:
+            proc.kill()
+            await proc.wait()
+        except (UnboundLocalError, ProcessLookupError):
+            pass
+    return ""
+
+
+async def _run_recording_attempt(update, context, channel, duration_seconds,
+                                 quality, aspect, audio_index, audio_mode,
+                                 audio_tracks, msg,
+                                 out_file, cancel_id, session_id):
+    """Run one guarded FFmpeg attempt and return status, stderr, and media time."""
+    proc = None
+    progress_file = None
+    stderr_task = None
+    updater_task = None
+    try:
+        proc, progress_file = await start_recording(
+            channel["stream_url"], duration_seconds, out_file, cancel_id,
+            cookie=channel.get("cookie", ""),
+            user_agent=channel.get("user_agent", ""),
+            license_url=channel.get("license_key", ""),
+            cenc_key=channel.get("cenc_key", ""),
+            quality=quality, aspect=aspect, audio_index=audio_index,
+            audio_mode=audio_mode,
+            audio_tracks=audio_tracks,
+            key_stream_url=channel.get("key_stream_url", ""),
+            watermark_path=channel.get("watermark_path", ""),
+            airtel_overlay=channel.get("airtel_overlay", False),
+            ott_watermark=channel.get("source") in {"airtel", "sunnxt"},
+            dishtv_channel=channel.get("source") == "dishtv",
+        )
+        ACTIVE_RECORDINGS[cancel_id] = proc
+        RECORDING_SESSION_PROC[session_id] = proc
+        stderr_task = asyncio.create_task(proc.stderr.read())
+
+        user_obj  = update.effective_user
+        filename  = os.path.basename(out_file)
+        rec_start = time.time()
+
+        # Initialise / refresh progress info for this attempt
+        progress_info = RECORDING_PROGRESS_INFO.setdefault(session_id, {})
+        progress_info.update({
+            "process":         proc,
+            "start_time":      progress_info.get("start_time", rec_start),
+            "duration":        float(duration_seconds),
+            "message_id":      getattr(msg, "message_id", None),
+            "chat_id":         getattr(getattr(msg, "chat", None), "id", update.effective_chat.id),
+            "speed":           0.0,
+            "filename":       filename,
+            "pct":            0.0,
+            "elapsed":        0.0,
+            "speed_mbps":     0.0,
+            "total_duration": float(duration_seconds),
+            "channel":        channel,
+            "platform":       channel.get("channelCategoryId", "Unknown"),
+            "user_obj":       user_obj,
+            "user_id":        user_obj.id,
+            "cancel_id":      cancel_id,
+            "status":         "Recording...",
+            "running":        True,
+            "progress_file":  progress_file,
+        })
+
+        # Send initial progress message with inline keyboard
+        keyboard = _build_rec_progress_inline(session_id)
+        try:
+            await msg.edit_text(
+                _build_rec_status_text(filename, 0.0, None),
+                parse_mode=ParseMode.MARKDOWN,
+                reply_markup=keyboard,
+            )
+        except Exception:
+            pass
+
+        # Start auto-updater asyncio task (updates every 5 s)
+        updater_task = asyncio.create_task(
+            _auto_updater(session_id, msg, progress_file,
+                          filename, duration_seconds, rec_start)
+        )
+        ACTIVE_UPDATERS[session_id] = updater_task
+
+        # ── Monitor FFmpeg — stall detection only (no message edits here) ──
+        # Encoding can be slower than real time on a busy worker. Use a
+        # generous hard ceiling, but stop promptly when neither media time nor
+        # the output file advances.
+        wall_deadline = rec_start + max(
+            60, duration_seconds * 4 + RECORDING_TIMEOUT_GRACE_SECONDS
+        )
+        cancelled = False
+        stalled   = False
+        stall_reason  = ""
+        media_elapsed = 0.0
+        last_activity_time = rec_start
+        last_progress_us   = 0
+        last_output_size   = 0
+
+        while True:
+            remaining_wall_time = wall_deadline - time.time()
+            if remaining_wall_time <= 0:
+                stalled      = True
+                stall_reason = "recording exceeded its maximum processing time"
+                try:
+                    if proc.returncode is None:
+                        proc.kill()
+                        await proc.wait()
+                except ProcessLookupError:
+                    pass
+                break
+            try:
+                await asyncio.wait_for(
+                    asyncio.shield(proc.wait()),
+                    timeout=min(5.0, remaining_wall_time),
+                )
+                break
+            except asyncio.TimeoutError:
+                pass
+            if (
+                cancel_id not in ACTIVE_RECORDINGS
+                or not RECORDING_PROGRESS_INFO.get(session_id, {}).get("running", True)
+            ):
+                cancelled = True
+                break
+
+            # Update stall detection counters and shared progress info
+            pg           = _read_ffmpeg_progress(progress_file)
+            out_us       = _progress_int(pg.get("out_time_us"), 0)
+            wall_elapsed = time.time() - rec_start
+            media_elapsed = out_us / 1_000_000 if out_us > 0 else wall_elapsed
+            media_elapsed = min(media_elapsed, duration_seconds)
+            total_bytes   = _progress_int(pg.get("total_size"), 0)
+            speed_mbps    = (total_bytes / 1024 / 1024) / max(wall_elapsed, 1)
+            output_size   = os.path.getsize(out_file) if os.path.exists(out_file) else 0
+
+            if out_us > last_progress_us or output_size > last_output_size:
+                last_activity_time  = time.time()
+                last_progress_us    = max(last_progress_us, out_us)
+                last_output_size    = max(last_output_size, output_size)
+
+            # Keep shared info current for the ⚡ Progress popup
+            info = RECORDING_PROGRESS_INFO.get(session_id)
+            if info:
+                info["pct"]        = min(99.0, media_elapsed / max(duration_seconds, 1) * 100)
+                info["elapsed"]    = media_elapsed
+                info["speed_mbps"] = speed_mbps
+                info["speed"]      = speed_mbps
+                info["process"]    = proc
+
+            if time.time() - last_activity_time >= RECORDING_STALL_TIMEOUT_SECONDS:
+                stalled      = True
+                stall_reason = (
+                    f"no media or output progress for "
+                    f"{RECORDING_STALL_TIMEOUT_SECONDS} seconds"
+                )
+                try:
+                    if proc.returncode is None:
+                        proc.kill()
+                        await proc.wait()
+                except ProcessLookupError:
+                    pass
+                break
+
+        stderr_bytes = await stderr_task
+        if (
+            cancelled
+            or not RECORDING_PROGRESS_INFO.get(session_id, {}).get("running", True)
+        ):
+            return "cancelled", "", media_elapsed
+        if stalled:
+            return (
+                "timeout",
+                f"Stream stopped: {stall_reason} "
+                f"(media reached {_fmt_time(media_elapsed)}).",
+                media_elapsed,
+            )
+        if proc.returncode != 0:
+            stderr_text = stderr_bytes.decode(errors="replace")[-1200:]
+            if "451" in stderr_text and (
+                "Unavailable For Legal Reasons" in stderr_text
+                or "HTTP error 451" in stderr_text
+            ):
+                return (
+                    "failed",
+                    "❌ The stream is currently unavailable (HTTP 451 — Legal block).\n"
+                    "This is a geo or legal restriction from the CDN/broadcaster.\n"
+                    "Please try again later.",
+                    media_elapsed,
+                )
+            return "failed", stderr_text, media_elapsed
+        valid, validation_error = await validate_recording_file(out_file)
+        if not valid:
+            return "invalid", validation_error, media_elapsed
+        return "ok", "", media_elapsed
+    except Exception as exc:
+        # Never leave a failed FFmpeg process running while the outer retry
+        # starts another attempt.
+        if proc and proc.returncode is None:
+            try:
+                proc.kill()
+                await proc.wait()
+            except (ProcessLookupError, OSError):
+                pass
+        if stderr_task and not stderr_task.done():
+            stderr_task.cancel()
+        return "failed", str(exc), 0.0
+    finally:
+        # Stop updater for this attempt; session-level cleanup is in run_recording_job
+        if updater_task and not updater_task.done():
+            updater_task.cancel()
+        ACTIVE_UPDATERS.pop(session_id, None)
+        ACTIVE_RECORDINGS.pop(cancel_id, None)
+        RECORDING_SESSION_PROC.pop(session_id, None)
+        info = RECORDING_PROGRESS_INFO.get(session_id)
+        if info:
+            info["process"] = None
+        if progress_file:
+            try:
+                os.remove(progress_file)
+            except OSError:
+                pass
+
+
+@require_verification
+async def rec_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    command_args = list(context.args)
+    source = "dishtv"
+    if command_args and command_args[0].strip().lower() in {
+        "-airtel", "-sunnxt"
+    }:
+        source = command_args[0].strip().lower().lstrip("-")
+        command_args = command_args[1:]
+    full_text = " ".join(command_args)
+    past_range = None
+
+    def duration_value(raw):
+        parts = raw.split(":")
+        if len(parts) == 3:
+            return int(parts[0]) * 3600 + int(parts[1]) * 60 + int(parts[2])
+        return int(parts[0]) * 60 + int(parts[1])
+
+    # Airtel/live aliases: /rec -airtel Channel 00:00:30 -t 00:00:30
+    combined_duration_match = re.match(
+        r"^(.+?)\s+(\d{1,2}:\d{2}:\d{2}|\d{1,2}:\d{2})"
+        r"\s+-t\s+(\d{1,2}:\d{2}:\d{2}|\d{1,2}:\d{2})$",
+        full_text.strip(),
+    )
+    # Format 1: /rec <channel> HH:MM:SS  or  MM:SS  (duration-based)
+    duration_match = re.match(
+        r"^(.+?)\s+(\d{1,2}:\d{2}:\d{2}|\d{1,2}:\d{2})$",
+        full_text.strip()
+    )
+    # Format 2: /rec <channel> -t HH:MMAM - HH:MMPM  (time-range-based)
+    timerange_match = re.match(
+        r"^(.+?)\s+-t\s+(\d{1,2}:\d{2}\s*[APap][Mm])\s*-\s*(\d{1,2}:\d{2}\s*[APap][Mm])$",
+        full_text.strip()
+    )
+
+    if combined_duration_match:
+        channel_name = combined_duration_match.group(1).strip()
+        first_duration = combined_duration_match.group(2).strip()
+        second_duration = combined_duration_match.group(3).strip()
+        duration_seconds = duration_value(first_duration)
+        if duration_seconds != duration_value(second_duration):
+            await update.message.reply_text(
+                "❌ Both duration values must be the same. Example: "
+                "`/rec -airtel Channel 00:00:30 -t 00:00:30`",
+                parse_mode=ParseMode.MARKDOWN,
+            )
+            return
+        time_range_label = first_duration
+    elif duration_match:
+        channel_name = duration_match.group(1).strip()
+        dur_str_raw = duration_match.group(2).strip()
+        duration_seconds = duration_value(dur_str_raw)
+        time_range_label = dur_str_raw
+    elif timerange_match:
+        channel_name = timerange_match.group(1).strip()
+        start_time_str = timerange_match.group(2).strip()
+        end_time_str = timerange_match.group(3).strip()
+        start_h, start_m = parse_time(start_time_str)
+        end_h, end_m = parse_time(end_time_str)
+        if start_h is None or end_h is None:
+            await update.message.reply_text("❌ Invalid time format. Example: `12:00PM`", parse_mode=ParseMode.MARKDOWN)
+            return
+        start_total = start_h * 60 + start_m
+        end_total = end_h * 60 + end_m
+        if end_total < start_total:
+            end_total += 24 * 60
+        duration_seconds = (end_total - start_total) * 60
+        time_range_label = f"{start_time_str} - {end_time_str}"
+        past_range = (start_h, start_m, end_h, end_m)
+    else:
+        await update.message.reply_text(
+            "❌ *Invalid format.*\n\n"
+            "*Option 1* — Duration:\n`/rec <channel> MM:SS`\n`/rec <channel> HH:MM:SS`\n\n"
+            "Example: `/rec Pogo 00:30` _(30 sec)_\n"
+            "Example: `/rec Pogo 01:30:00` _(1.5 hrs)_\n\n"
+            "*Option 2* — Time range:\n`/rec <channel> -t HH:MMAM - HH:MMPM`\n\n"
+            "Example: `/rec Pogo -t 12:00PM - 01:00PM`",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return
+
+    limit_mins = REC_LIMIT_SECONDS // 60
+    uid = update.effective_user.id
+    unlimited_duration = is_owner(uid) or is_premium(uid)
+    if duration_seconds > REC_LIMIT_SECONDS and not unlimited_duration:
+        await update.message.reply_text(
+            f"❌ *Recording limit exceeded!*\n\n"
+            f"Maximum: *{limit_mins} minutes*\n"
+            f"Requested: *{duration_seconds // 60} min {duration_seconds % 60} sec*\n\n"
+            f"Use a time range of 50 minutes or less.",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return
+
+    if not await check_process_slot(update):
+        return
+
+    # Signed DishTV playlist URLs can expire before the normal browse-cache
+    # TTL. Always load the latest entry when a recording command is started.
+    channel = find_channel(channel_name, force_refresh=True, source=source)
+    if not channel:
+        if source == "sunnxt":
+            provider = "Sunnxt Next"
+        elif source == "airtel":
+            provider = "Airtel Next"
+        else:
+            provider = "DishTV Next"
+        await update.message.reply_text(
+            f"❌ {provider} channel *{channel_name}* not found.",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        return
+    if not channel.get("stream_url"):
+        await update.message.reply_text(
+            f"❌ Stream URL not found for *{channel['channel_name']}*.",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        return
+
+    # Aspect selection is intentionally removed from the recording flow.
+    # Recordings use the default 16:9 layout without an extra menu/message.
+    prep_message = await update.message.reply_text(
+        _ott_probe_text(source)
+        if source in {"airtel", "sunnxt"} else
+        "🔍 Probing the stream…\n"
+        f"📡 Source: *{'Airtel' if source == 'airtel' else 'Sunnxt' if source == 'sunnxt' else 'DishTV'}*\n"
+        "📺 Aspect: *16:9* | Quality: *576p*",
+        parse_mode=ParseMode.MARKDOWN,
+    )
+    channel = refresh_channel(channel)
+    pending_stream_url = channel.get("stream_url", "")
+    if source == "airtel":
+        airtel_error = await asyncio.get_running_loop().run_in_executor(
+            None, _airtel_stream_error, pending_stream_url
+        )
+        if airtel_error:
+            await prep_message.edit_text(
+                f"❌ Airtel {channel.get('channel_name', channel_name)} stream unavailable.\n\n"
+                f"Provider response: {airtel_error}\n\n"
+                "The uploaded Airtel playlist entry was found, but the upstream stream "
+                "is not returning a valid HLS playlist.",
+            )
+            return
+    elif source == "sunnxt":
+        sunnxt_error = await asyncio.get_running_loop().run_in_executor(
+            None, _sunnxt_stream_error, channel
+        )
+        if sunnxt_error:
+            await prep_message.edit_text(
+                f"❌ Sunnxt {channel.get('channel_name', channel_name)} stream unavailable.\n\n"
+                f"Provider response: {sunnxt_error}",
+            )
+            return
+    else:
+        dish_error = await asyncio.get_running_loop().run_in_executor(
+            None, _dish_stream_error, channel
+        )
+        if dish_error:
+            if "451" in dish_error or "450" in dish_error:
+                login_hint = (
+                    "\n\nThe playlist and signed cookie are available, but the DishTV CDN "
+                    "is rejecting this bot server's network/IP. "
+                    "This is not an FFmpeg or playlist parsing error. "
+                    "Recording cannot start without an India-based outbound proxy/network."
+                )
+            elif "403" in dish_error or "401" in dish_error:
+                if load_credentials():
+                    login_hint = (
+                        "\n\nThe DishTV session has expired or is invalid. "
+                        "The owner should use `/login <10-digit mobile>` "
+                        "and verify again with an OTP to create a fresh session."
+                    )
+                else:
+                    login_hint = (
+                        "\n\nNo DishTV login session is available. "
+                        "The owner should first use `/login <10-digit mobile>`, "
+                        "then verify with `/otp <6-digit code>`.",
+                    )
+            else:
+                login_hint = ""
+            await prep_message.edit_text(
+                f"❌ DishTV {channel.get('channel_name', channel_name)} stream unavailable.\n\n"
+                f"Provider response: {dish_error}"
+                f"{login_hint}",
+            )
+            return
+    tracks = await probe_audio_tracks(
+        pending_stream_url, channel.get("cookie", ""), channel.get("user_agent", ""),
+        channel.get("cenc_key", ""),
+    )
+    selection_id = _secrets.token_hex(6)
+    PENDING_RECORDINGS[selection_id] = {
+        "user_id": update.effective_user.id,
+        "channel": channel,
+        "duration_seconds": duration_seconds,
+        "time_range_label": time_range_label,
+        "stream_url": pending_stream_url,
+        "aspect": "16:9",
+        "quality": "576p",
+        "tracks": tracks,
+        "past_range": past_range,
+    }
+    if source in {"airtel", "sunnxt"}:
+        await prep_message.edit_text(
+            _ott_quality_text(channel, tracks),
+            reply_markup=_ott_quality_keyboard(selection_id),
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        return
+    status = _audio_statuses(tracks)
+    keyboard = [[
+        InlineKeyboardButton(
+            "✅ Use All Audio Tracks",
+            callback_data=f"rec_audio:{selection_id}:multi",
+        )
+    ]]
+    await prep_message.edit_text(
+        f"📺 *{channel['channel_name']} recording ready*\n"
+        f"📡 Source: *{'Airtel' if source == 'airtel' else 'Sunnxt' if source == 'sunnxt' else 'DishTV'}*\n"
+        "🎞️ Quality: *576p* | Aspect: *16:9*\n\n"
+        f"{status}\n\n"
+        "Audio mode: *Multiple audio tracks*",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode=ParseMode.MARKDOWN,
+    )
+
+
+async def ott_quality_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Select output quality for Airtel/Sun NXT only."""
+    query = update.callback_query
+    parts = query.data.split(":")
+    if len(parts) != 3 or parts[2] not in {"480", "720", "1080"}:
+        await query.answer("Invalid OTT quality.", show_alert=True)
+        return
+    await query.answer()
+    selection_id, height = parts[1], parts[2]
+    pending = PENDING_RECORDINGS.get(selection_id)
+    if (
+        not pending
+        or pending.get("user_id") != query.from_user.id
+        or pending.get("channel", {}).get("source") not in {"airtel", "sunnxt"}
+    ):
+        await _edit_callback_message(
+            query, "❌ This OTT recording selection has expired."
+        )
+        return
+    pending["quality"] = f"{height}p"
+    tracks = pending.get("tracks", [])
+    await query.edit_message_text(
+        f"📺 *{pending['channel']['channel_name']} recording ready*\n"
+        f"📡 Source: *{'Airtel' if pending['channel'].get('source') == 'airtel' else 'Sun NXT'}*\n"
+        f"🎞️ Quality: *{pending['quality']}* | Aspect: *16:9*\n\n"
+        f"{_audio_statuses(tracks)}\n\n"
+        "Audio mode: *Multiple audio tracks*",
+        reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton(
+                "✅ Use All Audio Tracks",
+                callback_data=f"rec_audio:{selection_id}:multi",
+            )
+        ]]),
+        parse_mode=ParseMode.MARKDOWN,
+    )
+
+
+async def rec_aspect_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer("Probing the stream...")
+    parts = query.data.split(":")
+    if len(parts) != 4:
+        return
+    selection_id, aspect = parts[1], f"{parts[2]}:{parts[3]}"
+    pending = PENDING_RECORDINGS.get(selection_id)
+    if not pending or pending["user_id"] != query.from_user.id:
+        await _edit_callback_message(query, "❌ This recording selection has expired.")
+        return
+    pending["aspect"] = aspect
+    channel = refresh_channel(pending["channel"])
+    pending["channel"] = channel
+    pending["stream_url"] = channel.get("stream_url", pending["stream_url"])
+    tracks = await probe_audio_tracks(
+        pending["stream_url"],
+        channel.get("cookie", ""),
+        channel.get("user_agent", ""),
+        channel.get("cenc_key", ""),
+    )
+    pending["quality"] = "576p"
+    pending["tracks"] = tracks
+    status = _audio_statuses(tracks)
+    keyboard = [[
+        InlineKeyboardButton(
+            "✅ Use All Audio Tracks",
+            callback_data=f"rec_audio:{selection_id}:multi",
+        )
+    ]]
+    await query.edit_message_text(
+        "🔍 *Probing stream for audio tracks…*\n\n"
+        f"{status}\n\n"
+        "Audio mode: *Multiple audio tracks*",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode=ParseMode.MARKDOWN,
+    )
+
+
+async def rec_audio_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    parts = query.data.split(":")
+    if len(parts) != 3:
+        return
+    selection_id, language = parts[1], parts[2]
+    pending = PENDING_RECORDINGS.get(selection_id)
+    if not pending or pending["user_id"] != query.from_user.id:
+        await _edit_callback_message(query, "❌ This recording selection has expired.")
+        return
+    tracks = pending.get("tracks", [])
+    audio_mode = "multi" if language == "multi" else "single"
+    audio_index = _audio_index_for_language(tracks, language)
+
+    # ── DishTV: show watermark settings screen before recording ──────────
+    if pending["channel"].get("source") == "dishtv":
+        pending["audio_mode"]  = audio_mode
+        pending["audio_index"] = audio_index
+        text, keyboard = _build_watermark_menu(selection_id)
+        await query.edit_message_text(text, reply_markup=keyboard, parse_mode=ParseMode.MARKDOWN)
+        return
+    # ── Airtel/Sunnxt: use the OTT watermark settings before recording ─────
+    if pending["channel"].get("source") in {"airtel", "sunnxt"}:
+        pending["audio_mode"] = audio_mode
+        pending["audio_index"] = audio_index
+        text, keyboard = _build_ott_watermark_menu(selection_id)
+        await query.edit_message_text(
+            text, reply_markup=keyboard, parse_mode=ParseMode.MARKDOWN
+        )
+        return
+
+    # Keep the existing fallback for non-provider direct recordings unchanged.
+    PENDING_RECORDINGS.pop(selection_id, None)
+    try:
+        await query.message.delete()
+    except Exception:
+        await query.edit_message_text(
+            f"⏺ *Recording is starting…*\n"
+            f"📺 {pending['channel']['channel_name']}\n"
+            f"🎞️ {pending['quality']} | 🎧 "
+            f"{'All Audio Tracks' if audio_mode == 'multi' else language.title()}",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        status_message = query.message
+    else:
+        status_message = await context.bot.send_message(
+            chat_id=query.message.chat_id,
+            text=(
+                f"⏺ *Recording is starting…*\n"
+                f"📺 {pending['channel']['channel_name']}\n"
+                f"🎞️ {pending['quality']} | 🎧 "
+                f"{'All Audio Tracks' if audio_mode == 'multi' else language.title()}"
+            ),
+            parse_mode=ParseMode.MARKDOWN,
+        )
+    await run_recording_job(
+        update, context, pending["channel"], pending["duration_seconds"],
+        pending["time_range_label"], pending["aspect"], pending["quality"],
+        audio_index, audio_mode, tracks, status_message,
+        past_range=pending.get("past_range"),
+    )
+
+
+async def ott_watermark_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle watermark settings for Airtel and Sun NXT recordings only."""
+    query = update.callback_query
+    await query.answer()
+    parts = query.data.split(":")
+    if len(parts) < 3:
+        return
+    action = parts[1]
+
+    if action == "pos":
+        if len(parts) != 4:
+            return
+        position, selection_id = parts[2], parts[3]
+    else:
+        selection_id = parts[2]
+
+    pending = PENDING_RECORDINGS.get(selection_id)
+    if (
+        not pending
+        or pending.get("user_id") != query.from_user.id
+        or pending.get("channel", {}).get("source") not in {"airtel", "sunnxt"}
+    ):
+        await _edit_callback_message(
+            query, "❌ This OTT recording selection has expired."
+        )
+        return
+
+    if action == "pos":
+        save_ott_watermark_settings(mode=position)
+    elif action == "enable":
+        save_ott_watermark_settings(enabled=True)
+    elif action == "disable":
+        save_ott_watermark_settings(enabled=False)
+    elif action == "last2min":
+        settings = get_ott_watermark_settings()
+        save_ott_watermark_settings(last_2min=not settings["last_2min"])
+    elif action == "changeurl":
+        PENDING_OTT_URL_CHANGES[query.from_user.id] = selection_id
+        settings = get_ott_watermark_settings()
+        await query.edit_message_text(
+            "🔗 *Send the new watermark URL*\n\n"
+            f"Current: `{settings['custom_url'] or '(Default)'}`\n\n"
+            "Send `default` to restore the default URL.",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        return
+    elif action == "back":
+        tracks = pending.get("tracks", [])
+        status = _audio_statuses(tracks)
+        channel = pending["channel"]
+        await query.edit_message_text(
+            f"📺 *{channel['channel_name']} recording ready*\n"
+            f"📡 Source: *{'Airtel' if channel.get('source') == 'airtel' else 'Sun NXT'}*\n"
+            f"🎞️ Quality: *{pending.get('quality', '576p')}* | Aspect: *16:9*\n\n"
+            f"{status}\n\n"
+            "Audio mode: *Multiple audio tracks*",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton(
+                    "✅ Use All Audio Tracks",
+                    callback_data=f"rec_audio:{selection_id}:multi",
+                )
+            ]]),
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        return
+    elif action == "start":
+        PENDING_RECORDINGS.pop(selection_id, None)
+        audio_mode = pending.get("audio_mode", "multi")
+        audio_index = pending.get("audio_index", 0)
+        tracks = pending.get("tracks", [])
+        try:
+            await query.message.delete()
+        except Exception:
+            await query.edit_message_text(
+                "⏺ *Recording is starting…*\n"
+                f"📺 {pending['channel']['channel_name']}\n"
+                f"📡 {'Airtel' if pending['channel'].get('source') == 'airtel' else 'Sun NXT'}\n"
+                f"🎧 {'All Audio Tracks' if audio_mode == 'multi' else 'Selected Track'}",
+                parse_mode=ParseMode.MARKDOWN,
+            )
+            status_message = query.message
+        else:
+            status_message = await context.bot.send_message(
+                chat_id=query.message.chat_id,
+                text=(
+                    "⏺ *Recording is starting…*\n"
+                    f"📺 {pending['channel']['channel_name']}\n"
+                    f"📡 {'Airtel' if pending['channel'].get('source') == 'airtel' else 'Sun NXT'}\n"
+                    f"🎧 {'All Audio Tracks' if audio_mode == 'multi' else 'Selected Track'}"
+                ),
+                parse_mode=ParseMode.MARKDOWN,
+            )
+        await run_recording_job(
+            update, context, pending["channel"], pending["duration_seconds"],
+            pending["time_range_label"], pending["aspect"], pending["quality"],
+            audio_index, audio_mode, tracks, status_message,
+            past_range=pending.get("past_range"),
+        )
+        return
+
+    text, keyboard = _build_ott_watermark_menu(selection_id)
+    await query.edit_message_text(
+        text, reply_markup=keyboard, parse_mode=ParseMode.MARKDOWN
+    )
+
+
+async def rec_watermark_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle all rec_wm:* inline button presses from the DishTV watermark menu."""
+    query = update.callback_query
+    await query.answer()
+    # callback_data format: rec_wm:{action}:{selection_id}
+    #                  or:  rec_wm:pos:{position}:{selection_id}
+    parts = query.data.split(":")
+    if len(parts) < 3:
+        return
+    action = parts[1]
+
+    if action == "pos":
+        if len(parts) != 4:
+            return
+        position, selection_id = parts[2], parts[3]
+        pending = PENDING_RECORDINGS.get(selection_id)
+        if not pending or pending["user_id"] != query.from_user.id:
+            await _edit_callback_message(query, "❌ This recording selection has expired.")
+            return
+        save_watermark_settings(mode=position)
+        text, keyboard = _build_watermark_menu(selection_id)
+        await query.edit_message_text(text, reply_markup=keyboard, parse_mode=ParseMode.MARKDOWN)
+        return
+
+    selection_id = parts[2]
+    pending = PENDING_RECORDINGS.get(selection_id)
+    if not pending or pending["user_id"] != query.from_user.id:
+        await _edit_callback_message(query, "❌ This recording selection has expired.")
+        return
+
+    if action == "enable":
+        save_watermark_settings(enabled=True)
+        text, keyboard = _build_watermark_menu(selection_id)
+        await query.edit_message_text(text, reply_markup=keyboard, parse_mode=ParseMode.MARKDOWN)
+
+    elif action == "disable":
+        save_watermark_settings(enabled=False)
+        text, keyboard = _build_watermark_menu(selection_id)
+        await query.edit_message_text(text, reply_markup=keyboard, parse_mode=ParseMode.MARKDOWN)
+
+    elif action == "last2min":
+        ws = get_watermark_settings()
+        save_watermark_settings(last_2min=not ws["last_2min"])
+        text, keyboard = _build_watermark_menu(selection_id)
+        await query.edit_message_text(text, reply_markup=keyboard, parse_mode=ParseMode.MARKDOWN)
+
+    elif action == "changeurl":
+        PENDING_URL_CHANGES[query.from_user.id] = selection_id
+        ws = get_watermark_settings()
+        await query.edit_message_text(
+            "🔗 *Send the new watermark URL*\n\n"
+            f"Current: `{ws['custom_url'] or '(default)'}`\n\n"
+            "Paste only the URL in your next message.\n"
+            "Send `/setwatermark default` to restore the default URL.",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+
+    elif action == "back":
+        # Restore audio track selection menu
+        tracks = pending.get("tracks", [])
+        status = _audio_statuses(tracks)
+        ch = pending["channel"]
+        keyboard = InlineKeyboardMarkup([[
+            InlineKeyboardButton(
+                "✅ Use All Audio Tracks",
+                callback_data=f"rec_audio:{selection_id}:multi",
+            )
+        ]])
+        await query.edit_message_text(
+            f"📺 *{ch['channel_name']} recording ready*\n"
+            f"📡 Source: *{'Airtel' if ch.get('source') == 'airtel' else 'DishTV'}*\n"
+            "🎞️ Quality: *576p* | Aspect: *16:9*\n\n"
+            f"{status}\n\n"
+            "Audio mode: *Multiple audio tracks*",
+            reply_markup=keyboard,
+            parse_mode=ParseMode.MARKDOWN,
+        )
+
+    elif action == "start":
+        PENDING_RECORDINGS.pop(selection_id, None)
+        audio_mode  = pending.get("audio_mode", "multi")
+        audio_index = pending.get("audio_index", 0)
+        tracks      = pending.get("tracks", [])
+        try:
+            await query.message.delete()
+        except Exception:
+            await query.edit_message_text(
+                f"⏺ *Recording is starting…*\n"
+                f"📺 {pending['channel']['channel_name']}\n"
+                f"🎞️ {pending['quality']} | 🎧 "
+                f"{'All Audio Tracks' if audio_mode == 'multi' else 'Selected Track'}",
+                parse_mode=ParseMode.MARKDOWN,
+            )
+            status_message = query.message
+        else:
+            status_message = await context.bot.send_message(
+                chat_id=query.message.chat_id,
+                text=(
+                    f"⏺ *Recording is starting…*\n"
+                    f"📺 {pending['channel']['channel_name']}\n"
+                    f"🎞️ {pending['quality']} | 🎧 "
+                    f"{'All Audio Tracks' if audio_mode == 'multi' else 'Selected Track'}"
+                ),
+                parse_mode=ParseMode.MARKDOWN,
+            )
+        await run_recording_job(
+            update, context, pending["channel"], pending["duration_seconds"],
+            pending["time_range_label"], pending["aspect"], pending["quality"],
+            audio_index, audio_mode, tracks, status_message,
+            past_range=pending.get("past_range"),
+        )
+
+
+async def watermark_url_message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Capture the watermark URL the user types after clicking Change Watermark Link."""
+    uid = update.effective_user.id
+    selection_id = PENDING_URL_CHANGES.get(uid)
+    if not selection_id:
+        return  # Not waiting for URL from this user
+    PENDING_URL_CHANGES.pop(uid, None)
+    text = (update.message.text or "").strip()
+    if text.lower() in ("default", "/setwatermark default"):
+        save_watermark_settings(custom_url="")
+        reply = "✅ Watermark URL reset to the default."
+    elif text.startswith(("http://", "https://")):
+        save_watermark_settings(custom_url=text)
+        reply = f"✅ Watermark URL set:\n`{text}`"
+    else:
+        reply = "❌ Invalid URL. It must start with `http://` or `https://`."
+    pending = PENDING_RECORDINGS.get(selection_id)
+    if pending:
+        text_menu, keyboard = _build_watermark_menu(selection_id)
+        sent = await update.message.reply_text(reply, parse_mode=ParseMode.MARKDOWN)
+        # Re-send watermark menu so user can continue
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text=text_menu,
+            reply_markup=keyboard,
+            parse_mode=ParseMode.MARKDOWN,
+        )
+    else:
+        await update.message.reply_text(reply, parse_mode=ParseMode.MARKDOWN)
+
+
+async def ott_watermark_url_message_handler(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+):
+    """Capture a watermark URL requested from an OTT recording menu."""
+    uid = update.effective_user.id
+    selection_id = PENDING_OTT_URL_CHANGES.pop(uid, None)
+    if not selection_id:
+        return
+    pending = PENDING_RECORDINGS.get(selection_id)
+    if not pending or pending.get("user_id") != uid:
+        await update.message.reply_text("❌ This OTT recording selection has expired.")
+        return
+    text = (update.message.text or "").strip()
+    if text.lower() in ("default", "/setwatermark default"):
+        save_ott_watermark_settings(custom_url="")
+        reply = "✅ Watermark URL reset to the default."
+    elif text.startswith(("http://", "https://")):
+        save_ott_watermark_settings(custom_url=text)
+        reply = "✅ Watermark URL set."
+    else:
+        reply = "❌ Invalid URL. It must start with `http://` or `https://`."
+    await update.message.reply_text(reply, parse_mode=ParseMode.MARKDOWN)
+    menu_text, keyboard = _build_ott_watermark_menu(selection_id)
+    await context.bot.send_message(
+        chat_id=update.effective_chat.id,
+        text=menu_text,
+        reply_markup=keyboard,
+        parse_mode=ParseMode.MARKDOWN,
+    )
+
+
+async def run_recording_job(update, context, channel, duration_seconds,
+                            time_range_label, aspect, quality, audio_index,
+                            audio_mode, audio_tracks, msg, past_range=None):
+    global _active_processes
+    _active_processes += 1
+    work_dir   = None
+    dash_proxy = None
+    # session_id is constant for the lifetime of this recording (including retries)
+    session_id = _secrets.token_hex(6)
+    try:
+        # The playlist is cached for browsing, but its signed CDN cookie must
+        # be refreshed at recording time because it can expire sooner.
+        channel = refresh_channel(channel)
+        work_dir = f"/tmp/recording_{_secrets.token_hex(8)}"
+        os.makedirs(work_dir, exist_ok=True)
+        if past_range:
+            range_start, range_end, range_now = _requested_range_datetimes(past_range)
+            if range_start > range_now:
+                wait_seconds = max(0, int((range_start - range_now).total_seconds()))
+                await msg.edit_text(
+                    "⏳ *Waiting for the live recording start time…*\n"
+                    f"🕐 `{time_range_label}`\n"
+                    f"▶️ Recording will start in {wait_seconds // 60}m {wait_seconds % 60}s.",
+                    parse_mode=ParseMode.MARKDOWN,
+                )
+                await asyncio.sleep(wait_seconds)
+                channel = refresh_channel(channel)
+                past_range = None
+                await msg.edit_text(
+                    "⏺ *The live recording is starting…*\n"
+                    f"📺 {channel['channel_name']}\n"
+                    f"🕐 `{time_range_label}`",
+                    parse_mode=ParseMode.MARKDOWN,
+                )
+            elif range_end > range_now:
+                duration_seconds = max(
+                    1, int((range_end - range_now).total_seconds()) + 1
+                )
+                channel = refresh_channel(channel)
+                past_range = None
+                await msg.edit_text(
+                    "⏺ *The live recording will run from now until the end time…*\n"
+                    f"📺 {channel['channel_name']}\n"
+                    f"🕐 `{time_range_label}`",
+                    parse_mode=ParseMode.MARKDOWN,
+                )
+        if past_range:
+            try:
+                static_mpd = os.path.join(work_dir, "selected_dvr.mpd")
+                selected_seconds = 0
+                for dvr_attempt in range(3):
                     try:
-                        await status.edit_text(
-                            f"📥 **Downloading Catchup…**\n"
-                            f"📺 `{ch_label}`\n"
-                            f"[{bar}] {pct}%\n"
-                            f"⏱ Elapsed: {_seconds_to_hms(elapsed)} / {dur_label}"
+                        _, selected_seconds, _ = _create_static_dash_mpd(
+                            channel, *past_range, static_mpd
                         )
-                    except Exception:
-                        pass
-                    last_edit = time.time()
+                        break
+                    except ValueError as exc:
+                        wait_seconds = _dvr_manifest_wait_seconds(exc, past_range)
+                        if not wait_seconds or dvr_attempt == 2:
+                            raise
+                        await msg.edit_text(
+                            "⏳ *Waiting for the DVR live edge…*\n"
+                            f"🕐 `{time_range_label}`\n"
+                            f"🔄 Manifest refresh {wait_seconds} sec baad…",
+                            parse_mode=ParseMode.MARKDOWN,
+                        )
+                        await asyncio.sleep(wait_seconds)
+                        channel = refresh_channel(channel)
+                dash_proxy, proxy_mpd_url = _start_dash_proxy(static_mpd, channel)
+                proxy_base_url = proxy_mpd_url.rsplit("/", 1)[0] + "/dash/"
+                _set_static_mpd_base_url(static_mpd, proxy_base_url)
+                channel = dict(channel)
+                channel["key_stream_url"] = channel["stream_url"]
+                channel["stream_url"] = proxy_mpd_url
+                duration_seconds = selected_seconds
+                await msg.edit_text(
+                    "📼 *Selecting segments from the DVR window…*\n"
+                    f"🕐 `{time_range_label}`\n"
+                    "🔐 Preparing the signed DASH MPD…",
+                    parse_mode=ParseMode.MARKDOWN,
+                )
+            except (ET.ParseError, OSError, requests.RequestException, ValueError) as exc:
+                await msg.edit_text(
+                    f"❌ *DVR recording could not be started.*\n\n`{str(exc)[:900]}`",
+                    parse_mode=ParseMode.MARKDOWN,
+                )
+                return
+        bot_uname = BOTUSERNAME or context.bot.username or "bot"
+        safe_ch = re.sub(r'[\\/*?:"<>|]', "_", channel["channel_name"])
+        source_label = {
+            "airtel": "Airtel",
+            "sunnxt": "Sunnxt",
+        }.get(channel.get("source"), "Dishtv")
+        filename = f"[{safe_ch}]. {source_label}-DL.AAC.2.0.H264.-@{bot_uname}.mp4"
+        out_file = os.path.join(work_dir, filename)
+        user_obj = update.effective_user
+        status = "failed"
+        last_error = ""
+        cancel_id = ""
 
-        asyncio.get_event_loop().create_task(_dl_progress())
+        # A live DASH stream can return corrupt segments. Retry once with a
+        # freshly signed playlist entry, but never upload an unvalidated file.
+        media_elapsed = 0.0
+        for attempt in range(2):
+            cancel_id = _secrets.token_hex(4)
+            status, last_error, media_elapsed = await _run_recording_attempt(
+                update, context, channel, duration_seconds,
+                quality, aspect, audio_index, audio_mode, audio_tracks,
+                msg, out_file, cancel_id, session_id,
+            )
+            if status in ("ok", "cancelled"):
+                break
+            if attempt == 0:
+                if not past_range:
+                    channel = refresh_channel(channel)
+                try:
+                    os.remove(out_file)
+                except OSError:
+                    pass
+                await msg.edit_text(
+                    "⚠️ *Stream segment corrupt/disconnected.*\n"
+                    "Retrying the recording with a fresh stream…",
+                    parse_mode=ParseMode.MARKDOWN,
+                )
 
-        _, stderr = await proc.communicate()
+        # ── Partial-recording upload helper ──────────────────────────────
+        async def _upload_partial(out_path, rec_elapsed):
+            """Upload partial file if it exists and has content; return size_mb."""
+            if not os.path.exists(out_path):
+                return 0.0
+            fsize = os.path.getsize(out_path)
+            if fsize < 1024:
+                return 0.0
+            size_mb = fsize / (1024 * 1024)
+            cap = (
+                f"📼 *{channel['channel_name']}* (partial)\n"
+                f"🕐 {time_range_label}\n"
+                f"🎞️ {quality} | ⏱ {_fmt_time(rec_elapsed)}\n"
+                f"📦 {size_mb:.1f} MB"
+            )
+            try:
+                with open(out_path, "rb") as f:
+                    await context.bot.send_video(
+                        chat_id=update.effective_chat.id,
+                        video=f, caption=cap, parse_mode=ParseMode.MARKDOWN,
+                        supports_streaming=True, read_timeout=300, write_timeout=300,
+                    )
+            except Exception:
+                try:
+                    with open(out_path, "rb") as f:
+                        await context.bot.send_document(
+                            chat_id=update.effective_chat.id,
+                            document=f, caption=cap, parse_mode=ParseMode.MARKDOWN,
+                            read_timeout=300, write_timeout=300,
+                        )
+                except Exception:
+                    return 0.0
+            return size_mb
 
-        if user_tasks.get(uid, {}).get("cancel"):
-            await status.edit_text("❌ Download cancelled.")
-            user_tasks.pop(uid, None)
-            shutil.rmtree(tmp_dir, ignore_errors=True)
+        # ── Cancelled ────────────────────────────────────────────────────
+        if status == "cancelled":
+            partial_size = await _upload_partial(out_file, media_elapsed)
+            partial_uploaded = partial_size > 0
+            cancel_text = (
+                f"❌ Recording Cancelled\n\n"
+                f"{'⚠️ Partial Recording Sent\n\n' if partial_uploaded else ''}"
+                f"📄 File:\n`{filename}`\n\n"
+                f"⏺ Recorded:\n`{_fmt_time(media_elapsed)}`\n\n"
+            )
+            if partial_uploaded:
+                cancel_text += (
+                    f"📤 The recorded portion has been uploaded successfully.\n\n"
+                    f"⏳ Server copy auto-deletes in 1 hour."
+                )
+            else:
+                cancel_text += "⚠️ No partial recording was available to upload."
+            try:
+                await msg.edit_text(cancel_text, parse_mode=ParseMode.MARKDOWN)
+            except Exception:
+                pass
             return
 
-        if proc.returncode != 0:
-            err_text = (stderr or b"").decode(errors="ignore")[-500:]
-            LOG.error("ffmpeg catchup failed: %s", err_text)
-            user_tasks.pop(uid, None)
-            shutil.rmtree(tmp_dir, ignore_errors=True)
-            return await status.edit_text(
-                f"❌ **Download failed.**\n\n```{err_text}```"
+        # ── Failed / timeout / invalid ───────────────────────────────────
+        if status != "ok":
+            partial_size = await _upload_partial(out_file, media_elapsed)
+            partial_uploaded = partial_size > 0
+            error_detail = re.sub(
+                r"\s+", " ", str(last_error or "Unknown FFmpeg/stream error")
+            ).strip()
+            fail_text = (
+                f"❌ Recording Failed\n\n"
+                f"{'⚠️ Partial Recording Sent\n\n' if partial_uploaded else ''}"
+                f"📄 File:\n`{filename}`\n\n"
+                f"⏺ Recorded:\n`{_fmt_time(media_elapsed)}`\n\n"
             )
-
-        if not os.path.exists(out_file) or os.path.getsize(out_file) < 1024:
-            user_tasks.pop(uid, None)
-            shutil.rmtree(tmp_dir, ignore_errors=True)
-            return await status.edit_text(
-                "❌ Download complete hua lekin file empty hai.\n"
-                "Shayad stream mein content nahi tha is time range mein."
-            )
-
-        file_size_mb = os.path.getsize(out_file) / (1024 * 1024)
-        await status.edit_text(
-            f"✅ Download complete!\n"
-            f"📁 Size: `{file_size_mb:.1f} MB`\n"
-            f"📤 Upload ho raha hai…"
-        )
-
-        # Auto-compress if large (uses existing auto_compress_large_video)
-        final_file = out_file
-        final_file = await auto_compress_large_video(
-            out_file, tmp_dir, float(duration_sec), status, uid
-        )
-
-        caption = (
-            f"📺 **{ch_label}** — Catchup\n"
-            f"📅 {parsed['date_str']} | {parsed['start_time']} → {parsed['end_time']}\n"
-            f"⏱ {dur_label} | 📡 {src_label}\n"
-            f"🎬 {get_default_watermark()}"
-        )
-
-        try:
-            await message.reply_video(
-                video=final_file,
-                caption=caption,
-                supports_streaming=True,
-            )
-            await status.delete()
-        except Exception as upload_err:
-            LOG.warning("catchup video upload failed, trying document: %s", upload_err)
-            await message.reply_document(
-                document=final_file,
-                caption=caption,
-            )
-            await status.delete()
-
-    except Exception as e:
-        LOG.exception("dl_catchup_cmd error uid=%s: %s", uid, e)
-        try:
-            if status:
-                await status.edit_text(f"❌ **Kuch galat ho gaya:**\n`{e}`")
+            if error_detail:
+                fail_text += f"⚠️ Reason:\n`{error_detail[:700]}`\n\n"
+            if partial_uploaded:
+                fail_text += (
+                    f"📤 The recorded portion has been uploaded successfully.\n\n"
+                    f"⏳ Server copy auto-deletes in 1 hour."
+                )
             else:
-                await message.reply_text(f"❌ **Kuch galat ho gaya:**\n`{e}`")
+                fail_text += "⚠️ No partial recording was available to upload."
+            try:
+                await msg.edit_text(fail_text, parse_mode=ParseMode.MARKDOWN)
+            except Exception:
+                pass
+            return
+
+        # ── Recording complete — show completion then upload ──────────────
+        file_size = os.path.getsize(out_file)
+        size_mb   = file_size / (1024 * 1024)
+        mins, secs = divmod(int(duration_seconds), 60)
+        hrs  = mins // 60
+        mins = mins % 60
+        dur_str = f"{hrs:02d}:{mins:02d}:{secs:02d}" if hrs else f"{mins:02d}:{secs:02d}"
+        caption = (
+            f"📼 *{channel['channel_name']}*\n"
+            f"🕐 {time_range_label}\n"
+            f"🎞️ {quality} | 🎧 "
+            f"{'All Audio Tracks' if audio_mode == 'multi' else ('Hindi' if audio_index == 0 else 'Selected')}\n"
+            f"⏱ {dur_str} | 📦 {size_mb:.1f} MB"
+        )
+        thumbnail_path = os.path.join(work_dir, "recording_thumbnail.jpg")
+        try:
+            await msg.edit_text(
+                f"✅ Recording Completed\n\n"
+                f"📄 File:\n`{filename}`\n\n"
+                f"⏱ Duration:\n`{dur_str}`\n\n"
+                f"📦 Size:\n`{size_mb:.1f} MB`\n\n"
+                f"🖼️ Generating thumbnail...",
+                parse_mode=ParseMode.MARKDOWN,
+            )
+        except Exception:
+            pass
+        thumbnail_path = await _generate_recording_thumbnail(
+            out_file, thumbnail_path, duration_seconds
+        )
+        try:
+            await msg.edit_text(
+                f"✅ Recording Completed\n\n"
+                f"📄 File:\n`{filename}`\n\n"
+                f"⏱ Duration:\n`{dur_str}`\n\n"
+                f"📦 Size:\n`{size_mb:.1f} MB`\n\n"
+                f"📤 Uploading...",
+                parse_mode=ParseMode.MARKDOWN,
+            )
+        except Exception:
+            pass
+        try:
+            with open(out_file, "rb") as f:
+                if thumbnail_path:
+                    with open(thumbnail_path, "rb") as thumbnail_file:
+                        await context.bot.send_video(
+                            chat_id=update.effective_chat.id,
+                            video=f, thumbnail=thumbnail_file,
+                            caption=caption, parse_mode=ParseMode.MARKDOWN,
+                            supports_streaming=True, read_timeout=300,
+                            write_timeout=300,
+                        )
+                else:
+                    await context.bot.send_video(
+                        chat_id=update.effective_chat.id,
+                        video=f, caption=caption, parse_mode=ParseMode.MARKDOWN,
+                        supports_streaming=True, read_timeout=300,
+                        write_timeout=300,
+                    )
+        except Exception:
+            try:
+                with open(out_file, "rb") as f:
+                    await context.bot.send_video(
+                        chat_id=update.effective_chat.id,
+                        video=f, caption=caption, parse_mode=ParseMode.MARKDOWN,
+                        supports_streaming=True, read_timeout=300,
+                        write_timeout=300,
+                    )
+            except Exception:
+                with open(out_file, "rb") as f:
+                    await context.bot.send_document(
+                        chat_id=update.effective_chat.id,
+                        document=f, caption=caption, parse_mode=ParseMode.MARKDOWN,
+                        read_timeout=300, write_timeout=300,
+                    )
+        try:
+            await msg.edit_text(
+                f"✅ Recording Completed\n\n"
+                f"📄 File:\n`{filename}`\n\n"
+                f"⏺ Duration:\n`{dur_str}`\n\n"
+                f"📤 Upload completed successfully.\n\n"
+                f"⏳ Server copy auto-deletes in 3 hours.",
+                parse_mode=ParseMode.MARKDOWN,
+            )
         except Exception:
             pass
     finally:
-        user_tasks.pop(uid, None)
+        # Clean up session-level state
+        RECORDING_PROGRESS_INFO.pop(session_id, None)
+        RECORDING_SESSION_PROC.pop(session_id, None)
+        task = ACTIVE_UPDATERS.pop(session_id, None)
+        if task and not task.done():
+            task.cancel()
+        if dash_proxy is not None:
+            try:
+                dash_proxy.shutdown()
+                dash_proxy.server_close()
+            except OSError:
+                pass
+        if work_dir and os.path.exists(work_dir):
+            shutil.rmtree(work_dir, ignore_errors=True)
+        _active_processes -= 1
+
+
+async def channels_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = await update.message.reply_text("📋 Loading the channel list...")
+    source_arg = (
+        context.args[0].strip().lower()
+        if context.args else ""
+    )
+    airtel = source_arg == "-airtel"
+    sunnxt = source_arg == "-sunnxt"
+    try:
+        if airtel:
+            channels = get_airtel_channels()
+        elif sunnxt:
+            channels = get_sunnxt_channels()
+        else:
+            channels = get_channels()
+    except Exception:
+        await msg.edit_text("❌ Could not load the channels. Please try again later.")
+        return
+
+    if airtel or sunnxt:
+        if not channels:
+            await msg.edit_text(
+                f"❌ No {'Airtel' if airtel else 'Sunnxt'} channels are available. "
+                "Check the remote playlist."
+            )
+            return
+        provider = "Airtel" if airtel else "Sunnxt"
+        lines = [f"📡 *{provider} Channels* ({len(channels)} total)\n"]
+        for index, channel in enumerate(channels, start=1):
+            lines.append(f"{index}. {channel['channel_name']}")
+        text = "\n".join(lines)
+        if len(text) > 4000:
+            text = text[:3990] + "\n…"
+        await msg.edit_text(text, parse_mode=ParseMode.MARKDOWN)
+        return
+
+    categories = {}
+    for ch in channels:
+        cat = ch.get("channelCategoryId", "Other")
+        categories.setdefault(cat, []).append(ch["channel_name"])
+
+    keyboard = [[InlineKeyboardButton(cat, callback_data=f"cat_{cat}")] for cat in sorted(categories.keys())]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    await msg.edit_text(
+        f"📺 *DishTV Channels* ({len(channels)} total)\n\nChoose a category:",
+        reply_markup=reply_markup,
+        parse_mode=ParseMode.MARKDOWN
+    )
+
+
+async def category_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    cat = query.data.replace("cat_", "")
+    channels = get_channels()
+    cat_channels = [c for c in channels if c.get("channelCategoryId") == cat]
+
+    lines = [f"📺 *{cat}* ({len(cat_channels)} channels)\n"]
+    for ch in cat_channels:
+        catchup = " 📼" if ch.get("isCatchupAvailable") == "True" else ""
+        lines.append(f"• {ch['channel_name']}{catchup}")
+
+    text = "\n".join(lines)
+    if len(text) > 4000:
+        text = text[:4000] + "\n..."
+
+    keyboard = [[InlineKeyboardButton("« Back", callback_data="back_categories")]]
+    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.MARKDOWN)
+
+
+async def back_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    channels = get_channels()
+    categories = {}
+    for ch in channels:
+        cat = ch.get("channelCategoryId", "Other")
+        categories.setdefault(cat, []).append(ch["channel_name"])
+
+    keyboard = [[InlineKeyboardButton(cat, callback_data=f"cat_{cat}")] for cat in sorted(categories.keys())]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    await query.edit_message_text(
+        f"📺 *DishTV Channels* ({len(channels)} total)\n\nChoose a category:",
+        reply_markup=reply_markup,
+        parse_mode=ParseMode.MARKDOWN
+    )
+
+
+async def search_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await update.message.reply_text(
+            "❌ Usage: `/search <channel name>`\n"
+            "For Airtel: `/search -airtel <channel name>`\n"
+            "For Sunnxt: `/search -sunnxt <channel name>`",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        return
+
+    search_args = list(context.args)
+    source_arg = search_args[0].strip().lower()
+    airtel = source_arg == "-airtel"
+    sunnxt = source_arg == "-sunnxt"
+    if airtel or sunnxt:
+        search_args = search_args[1:]
+        if not search_args:
+            await update.message.reply_text(
+                "❌ Usage: `/search -airtel <channel name>` or "
+                "`/search -sunnxt <channel name>`",
+                parse_mode=ParseMode.MARKDOWN,
+            )
+            return
+
+    query = " ".join(search_args).lower()
+    if airtel:
+        channels = get_airtel_channels()
+    elif sunnxt:
+        channels = get_sunnxt_channels()
+    else:
+        channels = get_channels()
+    results = [c for c in channels if query in c["channel_name"].lower()]
+
+    if not results:
+        source_label = "Airtel" if airtel else "Sunnxt" if sunnxt else "JioTV"
+        await update.message.reply_text(
+            f"❌ No {source_label} channel matched `{query}`.",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        return
+
+    source_label = "Airtel" if airtel else "Sunnxt" if sunnxt else "JioTV"
+    lines = [f"🔍 *{source_label} Search: {query}* ({len(results)} results)\n"]
+    for ch in results[:20]:
+        catchup = " 📼" if ch.get("isCatchupAvailable") == "True" else ""
+        lines.append(f"• `{ch['channel_name']}`{catchup}")
+
+    if len(results) > 20:
+        lines.append(f"\n...and {len(results) - 20} more channels.")
+
+    await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN)
+
+
+# ── Owner-only commands ────────────────────────
+
+@owner_only
+async def setdefaultaudio_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Scan a replied video and change its default audio disposition."""
+    if context.args:
+        # Preserve the previously supported label-setting form.
+        label = " ".join(context.args).strip()
+        if len(label) > 100 or "\x00" in label:
+            await update.message.reply_text(
+                "❌ The audio label must be 100 characters or fewer.",
+            )
+            return
+        save_default_audio_label(label)
+        await update.message.reply_text(
+            "✅ Default audio label updated.\n\n"
+            f"Current Label:\n{get_audio_track_settings()['default_label']}",
+        )
+        return
+
+    source = _media_reply_source(update.message.reply_to_message)
+    if not source:
+        await update.message.reply_text(
+            "❌ Reply to a video with `/setdefaultaudio`."
+        )
+        return
+    if source.get("file_size") and source["file_size"] > TELEGRAM_BOT_DOWNLOAD_LIMIT:
+        await update.message.reply_text(
+            f"❌ The video exceeds the Telegram Bot API download limit of {telegram_limit_text()}."
+        )
+        return
+    if not await check_process_slot(update):
+        return
+
+    token = _secrets.token_hex(8)
+    filename = _media_safe_name(source["file_name"], "input.mkv")
+    status_message = await update.message.reply_text(
+        _build_default_audio_status_text(filename, "scan")
+    )
+    pending = {
+        "token": token,
+        "user_id": update.effective_user.id,
+        "chat_id": update.effective_chat.id,
+        "source": source,
+        "filename": filename,
+        "message_id": status_message.message_id,
+        "created_at": time.time(),
+    }
+    DEFAULT_AUDIO_PENDING[token] = pending
+    context.user_data["default_audio_pending"] = pending
+    pending["scan_task"] = asyncio.create_task(
+        _default_audio_scan_job(update, context, pending, status_message)
+    )
+
+
+async def _default_audio_scan_job(update, context, pending, status_message):
+    token = pending["token"]
+    work_dir = os.path.join("/tmp", f"default_audio_scan_{token}")
+    os.makedirs(work_dir, exist_ok=True)
+    try:
+        input_path = os.path.join(work_dir, pending["filename"])
+        await _media_download_telegram(context, pending["source"], input_path)
+        probe = await _stream_probe_file(input_path)
+        audio_streams = [
+            stream for stream in probe.get("streams", [])
+            if stream.get("codec_type") == "audio"
+        ]
+        if not audio_streams:
+            await status_message.edit_text(
+                f"❌ No audio tracks found.\n\n📄 File:\n{pending['filename']}"
+            )
+            return
+        pending["audio_streams"] = audio_streams
+        pending["duration"] = probe.get("duration", 0.0)
+        pending["input_path"] = input_path
+        await status_message.edit_text(
+            _build_default_audio_status_text(pending["filename"], "select"),
+            reply_markup=_default_audio_menu(token, audio_streams),
+        )
+        # Keep the downloaded probe input until selection or cancellation.
+        pending["work_dir"] = work_dir
+        return
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        logger.exception("Default audio scan failed")
         try:
-            shutil.rmtree(tmp_dir, ignore_errors=True)
+            await status_message.edit_text(
+                f"❌ Audio scan failed.\n\n{str(exc)[:700]}"
+            )
         except Exception:
+            pass
+    finally:
+        if pending.get("work_dir") != work_dir:
+            shutil.rmtree(work_dir, ignore_errors=True)
+        if pending.get("audio_streams") is None:
+            DEFAULT_AUDIO_PENDING.pop(token, None)
+            context.user_data.pop("default_audio_pending", None)
+
+
+async def default_audio_select_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    parts = query.data.split(":")
+    if len(parts) != 3:
+        await query.answer("Invalid audio selection.", show_alert=True, cache_time=0)
+        return
+    token = parts[1]
+    try:
+        selected_ordinal = int(parts[2])
+    except ValueError:
+        await query.answer("Invalid audio selection.", show_alert=True, cache_time=0)
+        return
+    pending = DEFAULT_AUDIO_PENDING.get(token)
+    if (
+        not pending
+        or pending.get("user_id") != query.from_user.id
+        or time.time() - pending.get("created_at", 0) > 15 * 60
+    ):
+        await query.answer("Audio selection expired.", show_alert=True, cache_time=0)
+        return
+    audio_streams = pending.get("audio_streams") or []
+    if selected_ordinal < 0 or selected_ordinal >= len(audio_streams):
+        await query.answer("Invalid audio track.", show_alert=True, cache_time=0)
+        return
+    selected_name = _default_audio_name(
+        audio_streams[selected_ordinal], selected_ordinal
+    )
+    pending["selected_ordinal"] = selected_ordinal
+    pending["audio_name"] = selected_name
+    await query.answer("Updating default audio...", cache_time=0)
+    await query.edit_message_text(
+        _build_default_audio_status_text(
+            pending["filename"], "updating", selected_name
+        ),
+        reply_markup=_build_default_audio_progress_inline(),
+    )
+    task_id = _secrets.token_hex(8)
+    pending["task_id"] = task_id
+    context.user_data["default_audio_task_id"] = task_id
+    context.user_data["default_audio_process"] = None
+    context.user_data["default_audio_upload_state"] = {
+        "phase": "ffmpeg",
+        "output_path": None,
+    }
+    global _active_processes
+    _active_processes += 1
+    RECORDING_PROGRESS_INFO[task_id] = {
+        "kind": "default_audio",
+        "process": None,
+        "start_time": time.time(),
+        "duration": float(pending.get("duration") or 0.0),
+        "total_duration": float(pending.get("duration") or 0.0),
+        "filename": pending["filename"],
+        "file_name": pending["filename"],
+        "message_id": query.message.message_id,
+        "chat_id": query.message.chat_id,
+        "speed": 0.0,
+        "speed_mbps": 0.0,
+        "platform": "Default Audio",
+        "channel": {"channelCategoryId": "Default Audio"},
+        "user_obj": query.from_user,
+        "user_id": query.from_user.id,
+        "pct": 0.0,
+        "elapsed": 0.0,
+        "status": "🎬 Updating Audio Flags",
+        "running": True,
+        "phase": "ffmpeg",
+        "audio_name": selected_name,
+        "work_dir": pending.get("work_dir", ""),
+        "progress_file": os.path.join(
+            pending.get("work_dir", "/tmp"), f"progress_{task_id}.txt"
+        ),
+    }
+    MEDIA_USER_TASKS[query.from_user.id] = task_id
+    pending["job_task"] = asyncio.create_task(
+        _default_audio_update_job(update, context, pending, query.message, task_id)
+    )
+
+
+async def default_audio_cancel_callback(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+):
+    query = update.callback_query
+    parts = query.data.split(":")
+    token = parts[1] if len(parts) == 2 else ""
+    pending = DEFAULT_AUDIO_PENDING.get(token)
+    if not pending or pending.get("user_id") != query.from_user.id:
+        await query.answer("Audio update menu expired.", show_alert=True, cache_time=0)
+        return
+    pending["cancelled"] = True
+    scan_task = pending.get("scan_task")
+    if scan_task and not scan_task.done():
+        scan_task.cancel()
+    task_id = pending.get("task_id")
+    info = RECORDING_PROGRESS_INFO.get(task_id) if task_id else None
+    if info:
+        info["running"] = False
+        info["cancel_message_sent"] = True
+        proc = RECORDING_SESSION_PROC.get(task_id) or info.get("process")
+        if proc and proc.returncode is None:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+        job_task = pending.get("job_task")
+        if job_task and not job_task.done():
+            job_task.cancel()
+        await query.edit_message_text(
+            "❌ Default Audio Update Cancelled\n\n"
+            "⚠️ Partial Output Deleted"
+        )
+    else:
+        await query.edit_message_text("❌ Default audio update cancelled.")
+    DEFAULT_AUDIO_PENDING.pop(token, None)
+    context.user_data.pop("default_audio_pending", None)
+    await query.answer("Cancelled.", cache_time=0)
+
+
+async def _default_audio_send_upload(context, status_message, output_path, info):
+    info["phase"] = "upload"
+    info["status"] = "📤 Uploading"
+    info["upload_bytes"] = 0
+    info["upload_size"] = os.path.getsize(output_path)
+    info["upload_start"] = time.time()
+    info["upload_remaining"] = 0.0
+    await status_message.edit_text(
+        _build_default_audio_status_text(
+            info["filename"], "done", info.get("audio_name", "")
+        ),
+        reply_markup=_build_default_audio_progress_inline(),
+    )
+    with open(output_path, "rb") as raw:
+        wrapped = _ProgressUploadFile(raw, info)
+        telegram_input = InputFile(
+            wrapped, filename=os.path.basename(output_path), read_file_handle=False
+        )
+        try:
+            await context.bot.send_video(
+                chat_id=status_message.chat_id,
+                video=telegram_input,
+                supports_streaming=True,
+                read_timeout=1800,
+                write_timeout=1800,
+            )
+        except Exception:
+            raw.seek(0)
+            retry_wrapped = _ProgressUploadFile(raw, info)
+            telegram_input = InputFile(
+                retry_wrapped,
+                filename=os.path.basename(output_path),
+                read_file_handle=False,
+            )
+            await context.bot.send_document(
+                chat_id=status_message.chat_id,
+                document=telegram_input,
+                read_timeout=1800,
+                write_timeout=1800,
+            )
+
+
+async def _default_audio_update_job(update, context, pending, status_message, task_id):
+    global _active_processes
+    info = RECORDING_PROGRESS_INFO.get(task_id)
+    work_dir = pending.get("work_dir")
+    output_path = None
+    try:
+        input_path = pending.get("input_path")
+        if not input_path or not os.path.exists(input_path):
+            raise RuntimeError("Scanned input file is no longer available.")
+        output_path = os.path.join(
+            work_dir, f"{Path(pending['filename']).stem}_default{Path(pending['filename']).suffix or '.mkv'}"
+        )
+        info["source_path"] = input_path
+        info["source_size"] = os.path.getsize(input_path)
+        info["output_path"] = output_path
+        context.user_data["default_audio_upload_state"]["output_path"] = output_path
+        progress_file = info["progress_file"]
+        audio_count = len(pending.get("audio_streams") or [])
+        cmd = [
+            "ffmpeg", "-hide_banner", "-y", "-i", input_path,
+            "-map", "0", "-c", "copy", "-map_chapters", "0",
+        ]
+        disposition_flags = {
+            "forced", "hearing_impaired", "visual_impaired", "clean_effects",
+            "attached_pic", "timed_thumbnails", "captions", "descriptions",
+            "metadata", "dependent", "still_image", "commentary", "dub",
+            "original", "lyrics", "karaoke",
+        }
+        for ordinal, stream in enumerate(pending.get("audio_streams") or []):
+            existing = stream.get("disposition") or {}
+            flags = [
+                flag for flag in disposition_flags
+                if existing.get(flag)
+            ]
+            if ordinal == pending["selected_ordinal"]:
+                flags.append("default")
+            cmd += [
+                f"-disposition:a:{ordinal}",
+                "+".join(flags) if flags else "0",
+            ]
+        cmd += ["-progress", progress_file, "-nostats", output_path]
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        info["process"] = proc
+        context.user_data["default_audio_process"] = proc
+        RECORDING_SESSION_PROC[task_id] = proc
+        ACTIVE_UPDATERS[task_id] = asyncio.create_task(
+            _auto_updater(
+                task_id, status_message, progress_file, info["filename"],
+                info["total_duration"], info["start_time"]
+            )
+        )
+        stderr_task = asyncio.create_task(proc.stderr.read())
+        while proc.returncode is None:
+            if not info.get("running", True):
+                if proc.returncode is None:
+                    proc.kill()
+                await proc.wait()
+                raise asyncio.CancelledError
+            await asyncio.sleep(0.3)
+        stderr = await stderr_task
+        if proc.returncode != 0:
+            raise RuntimeError(stderr.decode(errors="replace")[-800:] or "FFmpeg failed")
+        if not os.path.exists(output_path) or os.path.getsize(output_path) == 0:
+            raise RuntimeError("FFmpeg produced no output.")
+        info["phase"] = "upload"
+        context.user_data["default_audio_upload_state"]["phase"] = "upload"
+        await _default_audio_send_upload(context, status_message, output_path, info)
+        if info.get("running", True):
+            await status_message.edit_text(
+                "✅ Upload Completed\n\n"
+                f"📄 File:\n{pending['filename']}\n\n"
+                f"🎵 Default Audio:\n{info['audio_name']}",
+            )
+    except asyncio.CancelledError:
+        if info and not info.get("cancel_message_sent"):
+            try:
+                await status_message.edit_text(
+                    "❌ Default Audio Update Cancelled\n\n"
+                    "⚠️ Partial Output Deleted"
+                )
+            except Exception:
+                pass
+    except Exception as exc:
+        logger.exception("Default audio update failed")
+        if info and not info.get("cancel_message_sent"):
+            try:
+                await status_message.edit_text(
+                    f"❌ Default Audio Update Failed\n\n{str(exc)[:700]}"
+                )
+            except Exception:
+                pass
+    finally:
+        if info:
+            info["running"] = False
+        proc = RECORDING_SESSION_PROC.pop(task_id, None)
+        if proc and proc.returncode is None:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+        updater = ACTIVE_UPDATERS.pop(task_id, None)
+        if updater and updater is not asyncio.current_task() and not updater.done():
+            updater.cancel()
+        RECORDING_PROGRESS_INFO.pop(task_id, None)
+        MEDIA_USER_TASKS.pop(pending["user_id"], None)
+        DEFAULT_AUDIO_PENDING.pop(pending["token"], None)
+        context.user_data.pop("default_audio_pending", None)
+        context.user_data.pop("default_audio_task_id", None)
+        context.user_data.pop("default_audio_process", None)
+        context.user_data.pop("default_audio_upload_state", None)
+        shutil.rmtree(work_dir, ignore_errors=True)
+        _active_processes = max(0, _active_processes - 1)
+
+
+@owner_only
+async def setowner_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await update.message.reply_text("❌ Usage: `/setowner <user_id>`", parse_mode=ParseMode.MARKDOWN)
+        return
+    new_owner = context.args[0].strip()
+    os.environ["BOT_OWNER_ID"] = new_owner
+    await update.message.reply_text(f"✅ Owner set to `{new_owner}`", parse_mode=ParseMode.MARKDOWN)
+
+
+@owner_only
+async def addadmin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await update.message.reply_text("❌ Usage: `/addadmin <user_id>`", parse_mode=ParseMode.MARKDOWN)
+        return
+    uid = context.args[0].strip()
+    admins = get_admins()
+    admins[uid] = {"added_by": update.effective_user.id, "time": datetime.now(IST).isoformat()}
+    save_admins(admins)
+    await update.message.reply_text(f"✅ Admin added: `{uid}`", parse_mode=ParseMode.MARKDOWN)
+
+
+@owner_only
+async def removeadmin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await update.message.reply_text("❌ Usage: `/removeadmin <user_id>`", parse_mode=ParseMode.MARKDOWN)
+        return
+    uid = context.args[0].strip()
+    admins = get_admins()
+    if uid in admins:
+        del admins[uid]
+        save_admins(admins)
+        await update.message.reply_text(f"✅ Admin removed: `{uid}`", parse_mode=ParseMode.MARKDOWN)
+    else:
+        await update.message.reply_text(f"❌ `{uid}` is not in the admin list.", parse_mode=ParseMode.MARKDOWN)
+
+
+@owner_only
+async def adminlist_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    admins = get_admins()
+    if not admins:
+        await update.message.reply_text("📌 There are no admins.")
+        return
+    lines = ["👥 *Admin List*\n"]
+    for uid, info in admins.items():
+        lines.append(f"• `{uid}` (Added: {info.get('time', 'N/A')[:10]})")
+    await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN)
+
+
+@owner_only
+async def proxy_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    proxy = os.environ.get("JIOTV_PROXY_URL", "only_owner")
+    await update.message.reply_text(f"🌐 Proxy URL: `{proxy}`\n\n(Visible to the owner only)", parse_mode=ParseMode.MARKDOWN)
+
+# ── Watermark position commands ─────────────────
+
+@owner_only
+async def left_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await update.message.reply_text(
+            "❌ Usage: `/left <pixels>`\nExample: `/left 70px`",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        return
+    offset = parse_pixel_value(context.args[0])
+    if offset is None:
+        await update.message.reply_text(
+            "❌ Invalid value. Example: `/left 70px`",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        return
+    save_watermark_position("left", offset)
+    await update.message.reply_text(
+        f"✅ Watermark set `{offset}px` from the left edge.",
+        parse_mode=ParseMode.MARKDOWN,
+    )
+
+@owner_only
+async def right_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await update.message.reply_text(
+            "❌ Usage: `/right <pixels>`\nExample: `/right 20px`",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        return
+    offset = parse_pixel_value(context.args[0])
+    if offset is None:
+        await update.message.reply_text(
+            "❌ Invalid value. Example: `/right 20px`",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        return
+    save_watermark_position("right", offset)
+    await update.message.reply_text(
+        f"✅ Watermark set `{offset}px` from the right edge.",
+        parse_mode=ParseMode.MARKDOWN,
+    )
+
+
+@owner_only
+async def refreshpl_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Force-refresh the DishTV M3U playlist cache from GitHub."""
+    msg = await update.message.reply_text(
+        "🔄 Refreshing the playlist…", parse_mode=ParseMode.MARKDOWN
+    )
+    try:
+        channels = await asyncio.get_running_loop().run_in_executor(
+            None, lambda: get_channels(force_refresh=True)
+        )
+        await msg.edit_text(
+            f"✅ *Playlist updated!*\n"
+            f"📺 Loaded `{len(channels)}` channels.\n"
+            f"🔗 `{PLAYLIST_URL}`",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+    except Exception as exc:
+        await msg.edit_text(
+            f"❌ Playlist refresh fail:\n`{exc}`",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+
+
+# ── Cancel recording ──────────────────────────
+
+async def cancel_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await update.message.reply_text("❌ Usage: `/cancel <id>`", parse_mode=ParseMode.MARKDOWN)
+        return
+    cancel_id = context.args[0].strip()
+    proc = ACTIVE_RECORDINGS.get(cancel_id)
+    if not proc:
+        await update.message.reply_text("❌ Recording not found or it has already ended.", parse_mode=ParseMode.MARKDOWN)
+        return
+    # Only allow the owner, admins, or the user who started it (checked via ACTIVE_RECORDINGS ownership)
+    try:
+        proc.kill()
+    except Exception:
+        pass
+    ACTIVE_RECORDINGS.pop(cancel_id, None)
+    await update.message.reply_text(f"✅ Recording `{cancel_id}` cancelled.", parse_mode=ParseMode.MARKDOWN)
+
+
+# ── Premium commands (owner/admin only) ───────
+
+PREMIUM_PLANS = {
+    "free trial": "Free Trial",
+    "basic": "Basic",
+    "standard": "Standard",
+    "pro": "Pro",
+    "lifetime": "Lifetime",
+}
+
+
+def parse_premium_args(args):
+    """Return (timedelta, plan, error) for /premium_add arguments.
+
+    The user ID is handled by the command itself. With no duration, the
+    requested default is 30 days on the Standard plan. Plan names may contain
+    spaces, such as "Free Trial". Minutes and hours are also supported.
+    """
+    if not args:
+        return None, None, "missing"
+
+    duration = args[0].strip().lower()
+    consumed = 1
+    if len(args) >= 2 and args[0].isdigit():
+        unit_aliases = {
+            "m": "m", "min": "m", "mins": "m",
+            "minut": "m", "minute": "m", "minutes": "m",
+            "h": "h", "hr": "h", "hrs": "h",
+            "hour": "h", "hours": "h",
+            "d": "d", "day": "d", "days": "d",
+        }
+        separate_unit = unit_aliases.get(args[1].strip().lower())
+        if separate_unit:
+            duration = f"{duration}{separate_unit}"
+            consumed = 2
+    plan_text = " ".join(args[consumed:]).strip().lower()
+
+    if duration in ("forever", "lifetime"):
+        if plan_text and plan_text != "lifetime":
+            return None, None, "lifetime_plan"
+        return None, "Lifetime", None
+
+    # Plain numbers mean days. Compact values support minutes, hours and days.
+    # Keep the old 30D/1h format readable for existing admins.
+    if re.fullmatch(r"\d+[mMhHdD]", duration):
+        delta = parse_duration_str(duration)
+        if not delta:
+            return None, None, "duration"
+    elif duration.isdigit():
+        days = int(duration)
+        delta = timedelta(days=days) if days >= 1 else None
+    else:
+        return None, None, "duration"
+
+    if not delta or delta.total_seconds() < 60:
+        return None, None, "duration"
+
+    plan = PREMIUM_PLANS.get(plan_text or "standard")
+    if not plan:
+        return None, None, "plan"
+    if plan == "Lifetime":
+        return None, "Lifetime", None
+    return delta, plan, None
+
+@owner_admin_only
+async def premium_add_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await update.message.reply_text(
+            "❌ Usage: `/premium_add <user_id> [duration] [plan_name]`\n\n"
+            "Examples:\n"
+            "`/premium_add 123456789` — 30 days Standard\n"
+            "`/premium_add 123456789 59m` — 59 minutes Standard\n"
+            "`/premium_add 123456789 30 minute` — 30 minutes Standard\n"
+            "`/premium_add 123456789 1h` — 1 hour Standard\n"
+            "`/premium_add 123456789 2h Pro` — 2 hours Pro\n"
+            "`/premium_add 123456789 24h` — 24 hours Standard\n"
+            "`/premium_add 123456789 7` — 7 days Standard\n"
+            "`/premium_add 123456789 90 Pro` — 90 days Pro\n"
+            "`/premium_add 123456789 forever` — Lifetime",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return
+
+    uid = context.args[0].strip()
+    if not uid.isdigit():
+        await update.message.reply_text(
+            "❌ Enter a valid numeric user ID.",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return
+
+    duration, plan, error = parse_premium_args(context.args[1:] or ["30"])
+    if error == "lifetime_plan":
+        await update.message.reply_text(
+            "❌ Use only the `Lifetime` plan with `forever`/`Lifetime`.",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return
+    if error == "duration":
+        await update.message.reply_text(
+            "❌ Enter a valid duration: `30m`, `59m`, `1h`, "
+            "`2h`, `24h`, a whole number of days, or `forever`.",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return
+    if error == "plan":
+        await update.message.reply_text(
+            "❌ Invalid plan. Available plans: "
+            "`Free Trial`, `Basic`, `Standard`, `Pro`, `Lifetime`.",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return
+
+    now = datetime.now(IST)
+    expires_at = None if plan == "Lifetime" else now + duration
+    users = get_premium_users()
+    users[uid] = {
+        "added_by": str(update.effective_user.id),
+        "added_at": now.isoformat(),
+        "expires_at": expires_at.isoformat() if expires_at else None,
+        "duration": "forever" if plan == "Lifetime" else str(duration),
+        "plan": plan,
+    }
+    save_premium_users(users)
+
+    expiry_text = "Lifetime (no expiry)" if plan == "Lifetime" else (
+        f"{expires_at.strftime('%d-%b-%Y %I:%M %p')}"
+    )
+    if plan == "Lifetime":
+        duration_text = "Lifetime"
+    else:
+        total_seconds = int(duration.total_seconds())
+        if total_seconds % 86400 == 0:
+            duration_text = f"{total_seconds // 86400} days"
+        elif total_seconds % 3600 == 0:
+            duration_text = f"{total_seconds // 3600} hours"
+        else:
+            duration_text = f"{total_seconds // 60} minutes"
+    await update.message.reply_text(
+        f"✅ *Premium Added!*\n\n"
+        f"👤 User: `{uid}`\n"
+        f"📦 Plan: `{plan}`\n"
+        f"⏳ Duration: `{duration_text}`\n"
+        f"📅 Expires: `{expiry_text}`",
+        parse_mode=ParseMode.MARKDOWN
+    )
+
+
+@owner_admin_only
+async def premium_expire_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await update.message.reply_text("❌ Usage: `/premium_expire <user_id>`", parse_mode=ParseMode.MARKDOWN)
+        return
+    uid = context.args[0].strip()
+    users = get_premium_users()
+    if uid in users:
+        del users[uid]
+        save_premium_users(users)
+        await update.message.reply_text(
+            f"✅ Premium immediately expired for `{uid}`.",
+            parse_mode=ParseMode.MARKDOWN
+        )
+    else:
+        await update.message.reply_text(f"❌ No premium record found for `{uid}`.", parse_mode=ParseMode.MARKDOWN)
+
+
+# ── Owner + Admin commands ─────────────────────
+
+@owner_admin_only
+async def broadcast_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await update.message.reply_text("❌ Usage: `/broadcast <message>`", parse_mode=ParseMode.MARKDOWN)
+        return
+    message = " ".join(context.args)
+    user_data = get_user_data()
+    sent = 0
+    failed = 0
+    for uid in user_data:
+        try:
+            await context.bot.send_message(chat_id=uid, text=f"📢 *Broadcast*\n\n{message}", parse_mode=ParseMode.MARKDOWN)
+            sent += 1
+        except Exception:
+            failed += 1
+    await update.message.reply_text(f"✅ Broadcast sent: {sent} users\n❌ Failed: {failed} users")
+
+
+def _media_reply_source(message):
+    """Return a Telegram video source from a command's replied-to message."""
+    if not message:
+        return None
+    if message.video:
+        return {
+            "file_id": message.video.file_id,
+            "file_name": message.video.file_name or f"video_{message.message_id}.mp4",
+            "file_size": message.video.file_size or 0,
+        }
+    if message.document:
+        name = message.document.file_name or f"video_{message.message_id}.mkv"
+        mime = (message.document.mime_type or "").lower()
+        if mime.startswith("video/") or name.lower().endswith(
+            (".mp4", ".mkv", ".mov", ".webm", ".avi", ".ts")
+        ):
+            return {
+                "file_id": message.document.file_id,
+                "file_name": name,
+                "file_size": message.document.file_size or 0,
+            }
+    return None
+
+
+def _media_safe_name(name: str, fallback: str = "output.mp4") -> str:
+    name = os.path.basename(str(name or "").strip())
+    name = re.sub(r"[\x00-\x1f\\/:*?\"<>|]+", "_", name).strip(" .")
+    return name or fallback
+
+
+def _clean_stream_url(value: str) -> str:
+    """Remove outer quotes commonly included when a URL is sent in commands."""
+    url = str(value or "").strip()
+    while len(url) >= 2 and url[0] == url[-1] and url[0] in {"'", '"', "`"}:
+        url = url[1:-1].strip()
+    return url
+
+
+def _media_initial_text(filename: str, status: str = "Processing...") -> str:
+    return _build_media_status_text(_media_safe_name(filename), 0.0, None, status)
+
+
+def _media_register(task_id: str, status_message, user, filename: str,
+                    duration: float = 0.0, status: str = "Processing...",
+                    work_dir: str = ""):
+    now = time.time()
+    RECORDING_PROGRESS_INFO[task_id] = {
+        "kind": "media",
+        "process": None,
+        "start_time": now,
+        "duration": float(duration or 0),
+        "total_duration": float(duration or 0),
+        "filename": _media_safe_name(filename),
+        "file_name": _media_safe_name(filename),
+        "message_id": status_message.message_id,
+        "chat_id": status_message.chat_id,
+        "speed": 0.0,
+        "speed_mbps": 0.0,
+        "platform": "Media",
+        "channel": {"channelCategoryId": "Media"},
+        "user_obj": user,
+        "user_id": user.id,
+        "pct": 0.0,
+        "elapsed": 0.0,
+        "status": status,
+        "running": True,
+        "work_dir": work_dir,
+    }
+
+
+async def _media_start_updater(task_id: str, status_message):
+    info = RECORDING_PROGRESS_INFO[task_id]
+    task = asyncio.create_task(
+        _auto_updater(
+            task_id,
+            status_message,
+            info.get("progress_file"),
+            info["filename"],
+            info.get("total_duration", 0.0),
+            info["start_time"],
+        )
+    )
+    ACTIVE_UPDATERS[task_id] = task
+
+
+async def _media_upload_output(context, chat_id: int, output_path: str,
+                               caption: str = ""):
+    with open(output_path, "rb") as media_file:
+        try:
+            await context.bot.send_video(
+                chat_id=chat_id,
+                video=media_file,
+                caption=caption or None,
+                read_timeout=600,
+                write_timeout=600,
+                supports_streaming=True,
+            )
+        except Exception:
+            media_file.seek(0)
+            await context.bot.send_document(
+                chat_id=chat_id,
+                document=media_file,
+                caption=caption or None,
+                read_timeout=600,
+                write_timeout=600,
+            )
+
+
+async def _media_monitor_process(task_id: str, status_message, proc,
+                                 output_path: str, work_dir: str,
+                                 context, caption: str = "",
+                                 upload_callback=None):
+    """Monitor one cancellable FFmpeg process and edit its single status message."""
+    info = RECORDING_PROGRESS_INFO.get(task_id)
+    stderr_task = asyncio.create_task(proc.stderr.read())
+    if info:
+        info["process"] = proc
+    RECORDING_SESSION_PROC[task_id] = proc
+    try:
+        while proc.returncode is None:
+            info = RECORDING_PROGRESS_INFO.get(task_id)
+            if not info or not info.get("running", True):
+                if proc.returncode is None:
+                    try:
+                        proc.terminate()
+                        await asyncio.wait_for(proc.wait(), timeout=3)
+                    except Exception:
+                        try:
+                            proc.kill()
+                            await proc.wait()
+                        except Exception:
+                            pass
+                try:
+                    await status_message.edit_text(
+                        "❌ Process Cancelled\n\n⚠️ Partial Output Deleted"
+                    )
+                except Exception:
+                    pass
+                return False
+            await asyncio.sleep(0.4)
+
+        stderr = await stderr_task
+        if proc.returncode != 0:
+            detail = stderr.decode(errors="replace").strip()[-900:]
+            logger.warning("Media FFmpeg failed for %s: %s", task_id, detail)
+            try:
+                await status_message.edit_text(
+                    "❌ Processing Failed\n\n⚠️ Partial Output Deleted\n\n"
+                    f"📄 File:\n{info.get('filename', 'output') if info else 'output'}\n\n"
+                    f"⚠️ Reason:\n`{re.sub(r'\\s+', ' ', detail)[:700]}`",
+                    parse_mode=ParseMode.MARKDOWN,
+                )
+            except Exception:
+                pass
+            return False
+
+        if (
+            not upload_callback
+            and (not os.path.exists(output_path) or os.path.getsize(output_path) == 0)
+        ):
+            try:
+                await status_message.edit_text(
+                    "❌ Processing Failed\n\n⚠️ Partial Output Deleted"
+                )
+            except Exception:
+                pass
+            return False
+
+        info = RECORDING_PROGRESS_INFO.get(task_id)
+        if info:
+            info["pct"] = 100.0
+            info["status"] = "Uploading..."
+        try:
+            await status_message.edit_text(
+                f"✅ Processing Completed\n\n"
+                f"📄 File:\n{_media_safe_name(os.path.basename(output_path))}\n\n"
+                "📤 Uploading...",
+                reply_markup=_build_rec_progress_inline(task_id),
+            )
+        except Exception:
+            pass
+        if upload_callback:
+            await upload_callback()
+        else:
+            await _media_upload_output(
+                context, status_message.chat_id, output_path, caption
+            )
+        try:
+            await status_message.edit_text(
+                f"✅ Upload Completed\n\n"
+                f"📄 File:\n{_media_safe_name(os.path.basename(output_path))}\n\n"
+                "⏳ Server copy auto-deletes in 3 hours."
+            )
+        except Exception:
+            pass
+        return True
+    except asyncio.CancelledError:
+        raise
+    finally:
+        info = RECORDING_PROGRESS_INFO.get(task_id)
+        if info:
+            info["running"] = False
+        RECORDING_SESSION_PROC.pop(task_id, None)
+        ACTIVE_RECORDINGS.pop(task_id, None)
+        updater = ACTIVE_UPDATERS.pop(task_id, None)
+        if updater and not updater.done():
+            updater.cancel()
+        MEDIA_USER_TASKS.pop(info.get("user_id") if info else None, None)
+        RECORDING_PROGRESS_INFO.pop(task_id, None)
+        shutil.rmtree(work_dir, ignore_errors=True)
+        global _active_processes
+        _active_processes = max(0, _active_processes - 1)
+
+
+async def _media_remux_with_metadata(
+    task_id: str,
+    status_message,
+    input_path: str,
+    output_path: str,
+    work_dir: str,
+) -> tuple[bool, str]:
+    """Remux a completed media file with dynamic metadata and stream maps."""
+    progress_file = os.path.join(work_dir, f"metadata_{task_id}.txt")
+    metadata = await build_ffmpeg_metadata(input_path)
+    cmd = [
+        "ffmpeg", "-hide_banner", "-y", "-i", input_path,
+        "-map", "0", "-map_metadata", "0", "-map_chapters", "0",
+        "-c", "copy", "-progress", progress_file, "-nostats",
+        *metadata, output_path,
+    ]
+    proc = await asyncio.create_subprocess_exec(
+        *cmd,
+        stdout=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    RECORDING_SESSION_PROC[task_id] = proc
+    info = RECORDING_PROGRESS_INFO.get(task_id)
+    if info:
+        info["process"] = proc
+        info["progress_file"] = progress_file
+        info["status"] = "📝 Adding metadata"
+    stderr_task = asyncio.create_task(proc.stderr.read())
+    try:
+        while proc.returncode is None:
+            info = RECORDING_PROGRESS_INFO.get(task_id)
+            if not info or not info.get("running", True):
+                if proc.returncode is None:
+                    proc.terminate()
+                await proc.wait()
+                return False, "Remux cancelled."
+            await asyncio.sleep(0.4)
+        stderr = await stderr_task
+        if proc.returncode != 0:
+            return False, stderr.decode(errors="replace")[-1200:]
+        return True, ""
+    finally:
+        RECORDING_SESSION_PROC.pop(task_id, None)
+        info = RECORDING_PROGRESS_INFO.get(task_id)
+        if info:
+            info["process"] = None
+        try:
+            os.remove(progress_file)
+        except OSError:
             pass
 
 
-# ---------------------------------------------------------------------------
-# /dl help
-# ---------------------------------------------------------------------------
-@app.on_message(filters.command(["dlhelp", "DLHelp"]) & AUTH)
-async def dl_help_cmd(client: Client, message: Message):
-    await message.reply_text(
-        "📡 **JioTV Catchup Download**\n\n"
-        "**Syntax:**\n"
-        "`/dl -Jiotv -c ChannelName -t DD-MM-YYYY HH:MM AM/PM - HH:MM AM/PM -n File`\n\n"
-        "**Examples:**\n"
-        "`/dl -Jiotv -c Star Plus -t 02-07-2026 09:00 AM - 11:30 AM -n StarPlus_Morning`\n"
-        "`/dl -Jiotv -c Colors -t 01-07-2026 08:00 PM - 10:00 PM -n Colors_Primetime`\n"
-        "**Notes:**\n"
-        "• Date/time should be IST (Indian Standard Time)\n"
-        "• Max duration: 6 hours\n"
-        "• Free users: 3 min max | Verified: unlimited\n"
-        "• Use `/channels` to search JioTV channels\n"
+async def _media_run_ffmpeg(update, context, status_message, filename: str,
+                            cmd: list[str], output_path: str, work_dir: str,
+                            duration: float = 0.0, status: str = "Processing...",
+                            caption: str = "", upload_callback=None,
+                            metadata_input: str | None = None,
+                            metadata_streams: dict[str, list[int] | None] | None = None):
+    global _active_processes
+    user = update.effective_user
+    task_id = _secrets.token_hex(8)
+    MEDIA_USER_TASKS[user.id] = task_id
+    _active_processes += 1
+    _media_register(task_id, status_message, user, filename, duration, status, work_dir)
+    progress_file = os.path.join(work_dir, f"progress_{task_id}.txt")
+    info = RECORDING_PROGRESS_INFO[task_id]
+    info["progress_file"] = progress_file
+    if "-progress" not in cmd:
+        cmd = list(cmd)
+        insert_at = len(cmd) - 1
+        cmd[insert_at:insert_at] = ["-progress", progress_file, "-nostats"]
+    if metadata_input is None:
+        try:
+            input_position = cmd.index("-i")
+            metadata_input = cmd[input_position + 1]
+        except (ValueError, IndexError):
+            metadata_input = None
+    if metadata_input:
+        metadata = await build_ffmpeg_metadata(
+            metadata_input,
+            selected_streams=metadata_streams,
+        )
+        cmd[-1:-1] = metadata
+    await status_message.edit_text(
+        _media_initial_text(filename, status),
+        reply_markup=_build_rec_progress_inline(task_id),
+    )
+    await _media_start_updater(task_id, status_message)
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.PIPE,
+        )
+    except Exception as exc:
+        info["running"] = False
+        await status_message.edit_text(f"❌ Processing Failed\n\n{str(exc)[:800]}")
+        ACTIVE_UPDATERS.pop(task_id, None)
+        RECORDING_PROGRESS_INFO.pop(task_id, None)
+        MEDIA_USER_TASKS.pop(user.id, None)
+        shutil.rmtree(work_dir, ignore_errors=True)
+        _active_processes = max(0, _active_processes - 1)
+        return
+    await _media_monitor_process(
+        task_id, status_message, proc, output_path, work_dir, context,
+        caption, upload_callback,
     )
 
 
-# ---------------------------------------------------------------------------
-# /autocompress Yes|No  — owner-only toggle for auto-compression
-# ---------------------------------------------------------------------------
+async def _media_download_telegram(context, source: dict, destination: str):
+    telegram_file = await context.bot.get_file(
+        source["file_id"],
+        read_timeout=600,
+        write_timeout=600,
+        connect_timeout=60,
+        pool_timeout=60,
+    )
+    await telegram_file.download_to_drive(
+        custom_path=destination,
+        read_timeout=1800,
+        write_timeout=1800,
+        connect_timeout=60,
+        pool_timeout=60,
+    )
 
-@app.on_message(filters.command(["autocompress", "AutoCompress"]) & _OWNER_FILTER)
-async def autocompress_toggle_cmd(client: Client, message: Message):
-    args = message.text.split(None, 1)
-    current = _auto_compress_enabled()
 
-    # No argument — show current status
-    if len(args) < 2:
-        status_icon = "✅ Enabled" if current else "❌ Disabled"
-        return await message.reply_text(
-            f"🗜 **Auto-Compression Status:** {status_icon}\n\n"
-            f"• Triggers when recording is **800 MB – 1 GB**\n"
-            f"• Compresses to **~355 MB** at **640p / 576p**\n"
-            f"• All audio/language tracks are always preserved\n\n"
-            f"**Usage:**\n"
-            f"`/autocompress Yes` — enable\n"
-            f"`/autocompress No`  — disable"
+def _parse_trim_range(args: list[str], duration: float) -> tuple[int, int]:
+    """Parse START END while accepting natural separators such as `to`."""
+    values = [
+        str(value).strip()
+        for value in args
+        if str(value).strip().lower() not in {"to", "until", "-", "–", "—"}
+    ]
+    if len(values) < 2:
+        raise ValueError("Usage: /trim START to END")
+
+    def parse_clock(value: str) -> int:
+        pieces = [int(part) for part in value.split(":")]
+        if len(pieces) == 2:
+            return pieces[0] * 60 + pieces[1]
+        if len(pieces) == 3:
+            return pieces[0] * 3600 + pieces[1] * 60 + pieces[2]
+        raise ValueError("Invalid time.")
+
+    start, end = parse_clock(values[0]), parse_clock(values[1])
+    if start < 0 or end <= start or start >= duration:
+        raise ValueError("Invalid trim range.")
+    return start, min(end, int(duration))
+
+
+def _media_video_input_args(source_path: str, output_path: str,
+                            duration: float = 0.0) -> list[str]:
+    return [
+        "ffmpeg", "-hide_banner", "-y", "-i", source_path,
+        "-map", "0:v:0", "-map", "0:a?",
+        "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
+        "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "128k",
+        "-movflags", "+faststart",
+        *(["-t", str(duration)] if duration else []),
+        output_path,
+    ]
+
+
+async def _media_local_job(update, context, source: dict, operation: str,
+                           args: list[str], status_message=None):
+    user = update.effective_user
+    target_message = update.effective_message
+    if user.id in MEDIA_USER_TASKS:
+        await target_message.reply_text("⏳ One of your media jobs is already running.")
+        return
+    if source.get("file_size") and source["file_size"] > TELEGRAM_BOT_DOWNLOAD_LIMIT:
+        await target_message.reply_text("❌ The video exceeds the Telegram download limit.")
+        return
+    work_dir = f"/tmp/media_{_secrets.token_hex(8)}"
+    os.makedirs(work_dir, exist_ok=True)
+    input_path = os.path.join(work_dir, _media_safe_name(source["file_name"], "source.mp4"))
+    status = status_message or await target_message.reply_text(
+        _media_initial_text(source["file_name"], "Downloading...")
+    )
+    if status_message:
+        await status.edit_text(
+            _media_initial_text(source["file_name"], "Downloading..."),
         )
+    try:
+        await _media_download_telegram(context, source, input_path)
+        duration = await _media_duration_seconds(input_path)
+        output_name = f"{Path(source['file_name']).stem}_{operation}.mp4"
+        output_path = os.path.join(work_dir, _media_safe_name(output_name))
+        if operation in ("compress", "compressadvance"):
+            if operation in ("compress", "compressadvance"):
+            if operation == "compressadvance":
+                # 576p source -> fake/upscaled 1080p.
+                height = 1080
 
-    arg = args[1].strip().lower()
-    if arg in ("yes", "on", "true", "1", "enable"):
-        _set_auto_compress(True)
-        await message.reply_text(
-            "✅ **Auto-Compression Enabled**\n\n"
-            "Recordings between **800 MB – 1 GB** will now be automatically\n"
-            "compressed to **~355 MB** at **640p / 576p** before upload.\n"
-            "_All audio/language tracks are preserved._"
+                # Target approximately 300–380 MB for the complete file.
+                # Use the 380 MB ceiling and reserve muxing headroom.
+                duration_sec = max(float(duration or 0), 1.0)
+                target_bytes = 380 * 1024 * 1024
+                audio_bps = 128000
+                target_video_bps = int(
+                    max(
+                        300000,
+                        (target_bytes * 8 * 0.92 / duration_sec) - audio_bps
+                    )
+                )
+                target_video_kbps = max(300, target_video_bps // 1000)
+            else:
+                height = 720
+                target_video_kbps = None
+            cmd = [
+                "ffmpeg", "-hide_banner", "-y", "-i", input_path,
+                "-map", "0:v:0", "-map", "0:a?",
+                "-map", "0:s?", "-map", "0:t?",
+                "-vf", (
+                    "scale=1920:1080:flags=lanczos"
+                    if operation == "compressadvance"
+                    else f"scale=-2:{height}"
+                ),
+                "-c:v", "libx264",
+                "-preset", "veryfast",
+                *(
+                    ["-b:v", f"{target_video_kbps}k",
+                     "-maxrate", f"{target_video_kbps}k",
+                     "-bufsize", f"{target_video_kbps * 2}k"]
+                    if operation == "compressadvance"
+                    else ["-crf", "24"]
+                ),
+                "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "128k",
+                "-c:s", "copy", "-c:t", "copy", "-map_chapters", "0",
+                "-movflags", "+faststart", output_path,
+            ]
+            await _media_run_ffmpeg(
+                update, context, status, source["file_name"], cmd, output_path,
+                work_dir, duration, "Compressing...",
+                metadata_streams={"video": [0], "audio": None, "subtitle": None},
+            )
+        elif operation == "trim":
+            try:
+                start, end = _parse_trim_range(args, duration)
+            except ValueError:
+                await status.edit_text(
+                    "❌ Usage: `/trim START to END`\n"
+                    "Example: `/trim 00:00:10 to 00:01:00`"
+                )
+                shutil.rmtree(work_dir, ignore_errors=True)
+                return
+            cmd = [
+                "ffmpeg", "-hide_banner", "-y", "-ss", str(start), "-to", str(end),
+                "-i", input_path, "-map", "0", "-c", "copy",
+                "-map_chapters", "0",
+                "-avoid_negative_ts", "make_zero", output_path,
+            ]
+            await _media_run_ffmpeg(
+                update, context, status, source["file_name"], cmd, output_path,
+                work_dir, end - start, "Trimming...",
+                metadata_streams={"video": None, "audio": None, "subtitle": None},
+            )
+        elif operation == "audiotrack":
+            cmd = [
+                "ffmpeg", "-hide_banner", "-y", "-i", input_path,
+                "-map", "0:v:0", "-map", "0:a?", "-map", "0:s?",
+                "-map", "0:t?", "-c", "copy", "-map_chapters", "0",
+                "-disposition:a:0", "default", output_path,
+            ]
+            await _media_run_ffmpeg(
+                update, context, status, source["file_name"], cmd, output_path,
+                work_dir, duration, "Updating audio tracks...",
+                caption=_AUDIO_TRACK_COMPATIBILITY_NOTE,
+                metadata_streams={"video": [0], "audio": None, "subtitle": None},
+            )
+        elif operation == "watermark":
+            text = " ".join(args).strip() or "Dishtv Rec bot"
+            escaped = text.replace("\\", "\\\\").replace(":", "\\:").replace("'", "\\'")
+            cmd = [
+                "ffmpeg", "-hide_banner", "-y", "-i", input_path,
+                "-vf", f"drawtext=text='{escaped}':x=w-tw-24:y=h-th-24:"
+                       "fontsize=28:fontcolor=white:box=1:boxcolor=black@0.55",
+                "-map", "0:v:0", "-map", "0:a?", "-map", "0:s?", "-map", "0:t?",
+                "-c:v", "libx264",
+                "-preset", "veryfast", "-crf", "23", "-c:a", "aac",
+                "-b:a", "128k", "-c:s", "copy", "-c:t", "copy",
+                "-map_chapters", "0", "-movflags", "+faststart", output_path,
+            ]
+            await _media_run_ffmpeg(
+                update, context, status, source["file_name"], cmd, output_path,
+                work_dir, duration, "Adding watermark...",
+                metadata_streams={"video": [0], "audio": None, "subtitle": None},
+            )
+        elif operation == "screenshot":
+            count = max(1, min(30, int(args[0])) if args and args[0].isdigit() else 5)
+            pattern = os.path.join(work_dir, "shot_%02d.jpg")
+            fps = count / max(duration, 1)
+            cmd = [
+                "ffmpeg", "-hide_banner", "-y", "-i", input_path,
+                "-vf", f"fps={fps}", "-frames:v", str(count), pattern,
+            ]
+            async def upload_shots():
+                paths = sorted(Path(work_dir).glob("shot_*.jpg"))
+                if not paths:
+                    raise RuntimeError("FFmpeg did not generate any screenshots.")
+
+                # Telegram media groups accept at most 10 photos.
+                # Send a single screenshot as a normal photo, and split
+                # 11–30 screenshots into batches of 10.
+                for batch_start in range(0, len(paths), 10):
+                    batch = paths[batch_start:batch_start + 10]
+                    handles = []
+                    try:
+                        if len(batch) == 1:
+                            handle = open(batch[0], "rb")
+                            handles.append(handle)
+                            await context.bot.send_photo(
+                                chat_id=status.chat_id,
+                                photo=handle,
+                            )
+                        else:
+                            media = []
+                            for path in batch:
+                                handle = open(path, "rb")
+                                handles.append(handle)
+                                media.append(InputMediaPhoto(handle))
+                            await context.bot.send_media_group(
+                                chat_id=status.chat_id,
+                                media=media,
+                            )
+                    finally:
+                        for handle in handles:
+                            handle.close()
+            await _media_run_ffmpeg(
+                update, context, status, source["file_name"], cmd,
+                os.path.join(work_dir, "shot_01.jpg"), work_dir, duration,
+                "Extracting screenshots...", upload_callback=upload_shots,
+                metadata_streams={"video": [0], "audio": [], "subtitle": []},
+            )
+        else:
+            raise ValueError("Unknown media operation.")
+    except Exception as exc:
+        logger.exception("Media %s setup failed", operation)
+        MEDIA_USER_TASKS.pop(user.id, None)
+        try:
+            await status.edit_text(f"❌ {operation.title()} failed\n\n{str(exc)[:900]}")
+        except Exception:
+            pass
+        shutil.rmtree(work_dir, ignore_errors=True)
+
+
+async def _media_source_command(update, context, operation: str):
+    source = _media_reply_source(update.message.reply_to_message)
+    if not source:
+        await update.message.reply_text(
+            f"❌ Reply to a video or video document with `/{operation}`."
         )
-    elif arg in ("no", "off", "false", "0", "disable"):
-        _set_auto_compress(False)
-        await message.reply_text(
-            "❌ **Auto-Compression Disabled**\n\n"
-            "Large recordings will be uploaded as-is.\n"
-            "Use `/autocompress Yes` to re-enable."
+        return
+    await _media_local_job(update, context, source, operation, context.args)
+
+
+@require_verification
+async def compress_cmd(update, context):
+    await _media_source_command(update, context, "compress")
+
+
+@require_verification
+async def compressadvance_cmd(update, context):
+    await _media_source_command(update, context, "compressadvance")
+
+
+@require_verification
+async def screenshot_cmd(update, context):
+    source = _media_reply_source(update.message.reply_to_message)
+    if not source:
+        await update.message.reply_text(
+            "❌ Reply to a video or video document with `/screenshot`."
+        )
+        return
+    if context.args:
+        await _media_local_job(update, context, source, "screenshot", context.args)
+        return
+    if source.get("file_size") and source["file_size"] > TELEGRAM_BOT_DOWNLOAD_LIMIT:
+        await update.message.reply_text("❌ The video exceeds the Telegram download limit.")
+        return
+
+    token = _secrets.token_hex(6)
+    probe_dir = f"/tmp/screenshot_probe_{token}"
+    probe_path = os.path.join(
+        probe_dir, _media_safe_name(source["file_name"], "source.mp4")
+    )
+    os.makedirs(probe_dir, exist_ok=True)
+    try:
+        await _media_download_telegram(context, source, probe_path)
+        duration = await _media_duration_seconds(probe_path)
+        width, height = await _media_video_dimensions(probe_path)
+    except Exception as exc:
+        logger.exception("Screenshot source probe failed")
+        await update.message.reply_text(
+            f"❌ Screenshot source read failed.\n\n{str(exc)[:700]}"
+        )
+        return
+    finally:
+        shutil.rmtree(probe_dir, ignore_errors=True)
+
+    for old_token, pending in list(SCREENSHOT_PENDING.items()):
+        if time.time() - pending.get("created_at", 0) > QUALITY_PENDING_TTL:
+            SCREENSHOT_PENDING.pop(old_token, None)
+    resolution = f"{height}p" if height else "Unknown"
+    SCREENSHOT_PENDING[token] = {
+        "user_id": update.effective_user.id,
+        "chat_id": update.effective_chat.id,
+        "source": source,
+        "duration": duration,
+        "duration_text": (
+            f"{int(duration // 60):02d}:{int(duration % 60):02d}"
+            if duration < 3600 else _fmt_time(duration)
+        ),
+        "resolution": resolution,
+        "created_at": time.time(),
+    }
+    text, markup = _screenshot_menu(token, duration, width, height)
+    await update.message.reply_text(text, reply_markup=markup, parse_mode=ParseMode.MARKDOWN)
+
+
+@require_verification
+async def trim_cmd(update, context):
+    await _media_source_command(update, context, "trim")
+
+
+@require_verification
+async def watermark_cmd(update, context):
+    await _media_source_command(update, context, "watermark")
+
+
+@require_verification
+async def audiotrack_cmd(update, context):
+    await _media_source_command(update, context, "audiotrack")
+
+
+@require_verification
+async def download_cmd(update, context):
+    global _active_processes
+    if not context.args:
+        await update.message.reply_text("❌ Usage: `/download <video URL> [filename]`")
+        return
+    user = update.effective_user
+    if user.id in MEDIA_USER_TASKS:
+        await update.message.reply_text("⏳ One of your media jobs is already running.")
+        return
+    url = context.args[0]
+    requested_name = _media_safe_name(" ".join(context.args[1:]), "")
+    work_dir = f"/tmp/media_dl_{_secrets.token_hex(8)}"
+    os.makedirs(work_dir, exist_ok=True)
+    status = await update.message.reply_text(
+        _media_initial_text(requested_name or "Download", "Downloading...")
+    )
+    task_id = _secrets.token_hex(8)
+    MEDIA_USER_TASKS[user.id] = task_id
+    _active_processes += 1
+    _media_register(task_id, status, user, requested_name or "Download", 0.0, "Downloading...", work_dir)
+    info = RECORDING_PROGRESS_INFO[task_id]
+    await _media_start_updater(task_id, status)
+
+    def run_ytdlp():
+        def hook(data):
+            live_info = RECORDING_PROGRESS_INFO.get(task_id)
+            if not live_info or not live_info.get("running", True):
+                raise yt_dlp.utils.DownloadError("Cancelled by user.")
+            if data.get("status") == "downloading":
+                total = data.get("total_bytes") or data.get("total_bytes_estimate") or 0
+                if total:
+                    live_info["source_size"] = total
+                live_info["status"] = "Downloading..."
+                live_info["speed_mbps"] = (data.get("speed") or 0) / 1024 / 1024
+        outtmpl = os.path.join(work_dir, "%(title).160s.%(ext)s")
+        opts = {
+            "outtmpl": outtmpl,
+            "format": "bv*+ba/b",
+            "merge_output_format": "mp4",
+            "noplaylist": True,
+            "quiet": True,
+            "no_warnings": True,
+            "progress_hooks": [hook],
+        }
+        cookies_path = _user_cookies_path(user.id)
+        if _user_has_cookies(user.id):
+            opts["cookiefile"] = cookies_path
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            ydl.download([url])
+
+    try:
+        await asyncio.to_thread(run_ytdlp)
+        outputs = [
+            p for p in Path(work_dir).iterdir()
+            if p.is_file() and not p.name.startswith("progress_")
+        ]
+        if not outputs:
+            raise RuntimeError("Downloader produced no output.")
+        output = max(outputs, key=lambda p: p.stat().st_size)
+        if requested_name:
+            target = Path(work_dir) / requested_name
+            if target.suffix.lower() not in (".mp4", ".mkv", ".webm", ".mov"):
+                target = target.with_suffix(output.suffix)
+            output.rename(target)
+            output = target
+        metadata_output = Path(work_dir) / f"{output.stem}_metadata{output.suffix}"
+        metadata_ok, metadata_error = await _media_remux_with_metadata(
+            task_id,
+            status,
+            str(output),
+            str(metadata_output),
+            work_dir,
+        )
+        if not metadata_ok:
+            raise RuntimeError(f"Metadata remux failed: {metadata_error}")
+        output.unlink(missing_ok=True)
+        metadata_output.rename(output)
+        info["running"] = False
+        updater = ACTIVE_UPDATERS.pop(task_id, None)
+        if updater and not updater.done():
+            updater.cancel()
+        await status.edit_text(
+            f"✅ Download Completed\n\n📄 File:\n{output.name}\n\n"
+            "📤 Uploading..."
+        )
+        await _media_upload_output(context, status.chat_id, str(output))
+        await status.edit_text(
+            f"✅ Upload Completed\n\n📄 File:\n{output.name}\n\n"
+            "⏳ Server copy auto-deletes in 3 hours."
+        )
+    except Exception as exc:
+        cancelled = not RECORDING_PROGRESS_INFO.get(task_id, {}).get("running", True)
+        await status.edit_text(
+            "❌ Process Cancelled\n\n⚠️ Partial Output Deleted"
+            if cancelled else f"❌ Download Failed\n\n{str(exc)[:900]}"
+        )
+    finally:
+        RECORDING_PROGRESS_INFO.pop(task_id, None)
+        RECORDING_SESSION_PROC.pop(task_id, None)
+        MEDIA_USER_TASKS.pop(user.id, None)
+        updater = ACTIVE_UPDATERS.pop(task_id, None)
+        if updater and not updater.done():
+            updater.cancel()
+        shutil.rmtree(work_dir, ignore_errors=True)
+        _active_processes = max(0, _active_processes - 1)
+
+
+@require_verification
+async def drec_cmd(update, context):
+    if len(context.args) < 2:
+        await update.message.reply_text(
+            "❌ Usage: `/drec <stream URL> <duration> [filename]`\n"
+            "Example: `/drec https://example/live.m3u8 00:00:30 demo`"
+        )
+        return
+    try:
+        parts = [int(x) for x in context.args[1].split(":")]
+        duration = parts[-1] + (parts[-2] * 60 if len(parts) > 1 else 0) + (
+            parts[-3] * 3600 if len(parts) > 2 else 0
+        )
+        if duration <= 0:
+            raise ValueError
+    except ValueError:
+        await update.message.reply_text("❌ Enter the duration in HH:MM:SS or MM:SS format.")
+        return
+    if update.effective_user.id in MEDIA_USER_TASKS:
+        await update.message.reply_text("⏳ One of your media jobs is already running.")
+        return
+    url = _clean_stream_url(context.args[0])
+    if not url.lower().startswith(("http://", "https://")):
+        await update.message.reply_text("❌ Enter a valid HTTP/HTTPS stream URL.")
+        return
+    name = _media_safe_name(" ".join(context.args[2:]) or "direct_recording.mp4")
+    if not Path(name).suffix:
+        name += ".mp4"
+    work_dir = f"/tmp/media_rec_{_secrets.token_hex(8)}"
+    os.makedirs(work_dir, exist_ok=True)
+    output = os.path.join(work_dir, name)
+    status = await update.message.reply_text(_media_initial_text(name, "Recording..."))
+    task_id = _secrets.token_hex(8)
+    MEDIA_USER_TASKS[update.effective_user.id] = task_id
+    global _active_processes
+    _active_processes += 1
+    _media_register(task_id, status, update.effective_user, name, duration, "Recording...", work_dir)
+    try:
+        proc, progress_file = await start_recording(
+            url, duration, output, task_id, quality="576p",
+            audio_mode="multi", audio_tracks=[],
+            dishtv_channel=False,
+        )
+        info = RECORDING_PROGRESS_INFO[task_id]
+        info["progress_file"] = progress_file
+        await _media_start_updater(task_id, status)
+        await _media_monitor_process(task_id, status, proc, output, work_dir, context)
+    except Exception as exc:
+        await status.edit_text(f"❌ Recording Failed\n\n{str(exc)[:900]}")
+        RECORDING_PROGRESS_INFO.pop(task_id, None)
+        MEDIA_USER_TASKS.pop(update.effective_user.id, None)
+        shutil.rmtree(work_dir, ignore_errors=True)
+        _active_processes = max(0, _active_processes - 1)
+
+
+@require_verification
+async def merge_cmd(update, context):
+    source = _media_reply_source(update.message.reply_to_message)
+    if not source:
+        await update.message.reply_text(
+            "❌ Reply to the first video with `/merge`. "
+            "Then send the second video."
+        )
+        return
+    MEDIA_MERGE_SESSIONS[update.effective_user.id] = {
+        "first": source,
+        "chat_id": update.effective_chat.id,
+        "created_at": time.time(),
+    }
+    await update.message.reply_text(
+        "🎬 First video saved.\nSend the second video now; merging will start automatically."
+    )
+
+
+async def media_merge_video_handler(update, context):
+    user = update.effective_user
+    session = MEDIA_MERGE_SESSIONS.get(user.id)
+    second = _media_reply_source(update.message) or _media_reply_source(
+        update.message.reply_to_message
+    )
+    if not session or not second:
+        return
+    if time.time() - session.get("created_at", 0) > 30 * 60:
+        MEDIA_MERGE_SESSIONS.pop(user.id, None)
+        await update.message.reply_text("❌ Merge session expired. Start again with `/merge`.")
+        return
+    MEDIA_MERGE_SESSIONS.pop(user.id, None)
+    source = session["first"]
+    work_dir = f"/tmp/media_merge_{_secrets.token_hex(8)}"
+    os.makedirs(work_dir, exist_ok=True)
+    status = await update.message.reply_text(
+        _media_initial_text("merged_video.mp4", "Downloading...")
+    )
+    task_id = _secrets.token_hex(8)
+    MEDIA_USER_TASKS[user.id] = task_id
+    global _active_processes
+    _active_processes += 1
+    _media_register(task_id, status, user, "merged_video.mp4", 0.0, "Merging...", work_dir)
+    try:
+        first_path = os.path.join(work_dir, "first")
+        second_path = os.path.join(work_dir, "second")
+        await _media_download_telegram(context, source, first_path)
+        await _media_download_telegram(context, second, second_path)
+        list_path = os.path.join(work_dir, "concat.txt")
+        with open(list_path, "w", encoding="utf-8") as handle:
+            for path in (first_path, second_path):
+                escaped_path = path.replace("'", "'\\''")
+                handle.write(f"file '{escaped_path}'\n")
+        output = os.path.join(work_dir, "merged_video.mp4")
+        cmd = [
+            "ffmpeg", "-hide_banner", "-y", "-f", "concat", "-safe", "0",
+            "-i", list_path, "-map", "0", "-c", "copy",
+            "-map_chapters", "0", output,
+        ]
+        await _media_run_ffmpeg(
+            update, context, status, "merged_video.mp4", cmd, output, work_dir,
+            0.0, "Merging...",
+            caption=_AUDIO_TRACK_COMPATIBILITY_NOTE,
+            metadata_input=first_path,
+            metadata_streams={"video": None, "audio": None, "subtitle": None},
+        )
+    except Exception as exc:
+        await status.edit_text(f"❌ Merge Failed\n\n{str(exc)[:900]}")
+        RECORDING_PROGRESS_INFO.pop(task_id, None)
+        MEDIA_USER_TASKS.pop(user.id, None)
+        shutil.rmtree(work_dir, ignore_errors=True)
+        _active_processes = max(0, _active_processes - 1)
+
+
+# ── Main ───────────────────────────────────────
+
+def main():
+    load_bot_mode()
+    if not BOT_TOKEN:
+        logger.error("TELEGRAM_BOT_TOKEN is not set!")
+        return
+
+    _start_local_telegram_api()
+    app_builder = Application.builder().token(BOT_TOKEN)
+    if TELEGRAM_LOCAL_API_ENABLED:
+        local_api_base = f"{TELEGRAM_LOCAL_API_URL}/bot"
+        local_file_base = f"{TELEGRAM_LOCAL_API_URL}/file/bot"
+        app_builder = app_builder.base_url(local_api_base).base_file_url(local_file_base)
+        logger.info(
+            "Local Telegram Bot API enabled; file limit %s.",
+            telegram_limit_text(),
         )
     else:
-        await message.reply_text(
-            "⚠️ Unknown option.\n\n"
-            "**Usage:**\n"
-            "`/autocompress Yes` — enable\n"
-            "`/autocompress No`  — disable\n"
-            "`/autocompress`     — show current status"
+        logger.info(
+            "Telegram cloud Bot API enabled; file limits are %s download / %s upload.",
+            telegram_limit_text(),
+            telegram_upload_limit_text(),
         )
+    app = app_builder.concurrent_updates(True).build()
+    logger.info(
+        "Group access policy: %s authorized group(s); all other groups will be left automatically. "
+        "Private chat access: owner/premium only.",
+        len(AUTHORIZED_GROUP_IDS - UNAUTHORIZED_GROUP_IDS),
+    )
 
+    # Always inspect the chat before any command or callback handler.
+    app.add_handler(TypeHandler(Update, bot_mode_access_guard), group=-2)
+    app.add_handler(TypeHandler(Update, leave_unauthorized_group), group=-1)
 
-# ---------------------------------------------------------------------------
-# /compresssettings  — owner-only: view or change auto-compress thresholds
-# ---------------------------------------------------------------------------
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("help", start))
+    app.add_handler(CommandHandler("login", login_cmd))
+    app.add_handler(CommandHandler("otp", otp_cmd))
+    app.add_handler(CommandHandler("qualitymax", qualitymax_cmd))
+    app.add_handler(CommandHandler("merge_video_and_audio", merge_video_audio_cmd))
+    app.add_handler(CommandHandler("download", download_cmd))
+    app.add_handler(CommandHandler("drec", drec_cmd))
+    app.add_handler(CommandHandler("compress", compress_cmd))
+    app.add_handler(CommandHandler("compressadvance", compressadvance_cmd))
+    app.add_handler(CommandHandler("screenshot", screenshot_cmd))
+    app.add_handler(CommandHandler("trim", trim_cmd))
+    app.add_handler(CommandHandler("merge", merge_cmd))
+    app.add_handler(CommandHandler("watermark", watermark_cmd))
+    app.add_handler(CommandHandler("audiotrack", audiotrack_cmd))
+    app.add_handler(CommandHandler("streamextractor", stream_extractor_cmd))
+    app.add_handler(MessageHandler(
+        filters.Regex(re.compile(
+            r"^/StreamExtractor(?:@\w+)?(?:\s|$)", re.IGNORECASE
+        )),
+        stream_extractor_cmd,
+    ))
+    app.add_handler(MessageHandler(
+        filters.Regex(re.compile(
+            r"^/merge_video_and_audio(?:@\w+)?(?:\s|$)",
+            re.IGNORECASE,
+        )),
+        merge_video_audio_cmd,
+    ))
+    # Telegram command names are normally lowercase; accept the exact
+    # user-facing `/Qualitymax` spelling as well.
+    app.add_handler(MessageHandler(
+        filters.Regex(r"^/Qualitymax(?:@\w+)?(?:\s|$)"),
+        qualitymax_cmd,
+    ))
+    app.add_handler(CommandHandler("verify", verify_cmd))
+    app.add_handler(CommandHandler("set_cookies", set_cookies_cmd))
+    app.add_handler(CommandHandler("cookies_status", cookies_status_cmd))
+    app.add_handler(CommandHandler("del_cookies", del_cookies_cmd))
+    app.add_handler(CommandHandler("rec", rec_cmd))
+    app.add_handler(CommandHandler("dl", rec_cmd))
+    app.add_handler(CommandHandler("schedule", schedule_cmd))
+    app.add_handler(CommandHandler("channels", channels_cmd))
+    app.add_handler(CommandHandler("search", search_cmd))
+    app.add_handler(CommandHandler("myinfo", myinfo))
+    app.add_handler(CommandHandler("public", public_cmd))
+    app.add_handler(CommandHandler("private", private_cmd))
 
-@app.on_message(filters.command(["compresssettings", "CompressSettings"]) & _OWNER_FILTER)
-async def compress_settings_cmd(client: Client, message: Message):
-    """
-    Usage:
-      /compresssettings                    — show current values
-      /compresssettings min <MB>           — set lower trigger (default 800)
-      /compresssettings max <MB>           — set upper trigger (default 1024)
-      /compresssettings target <MB>        — set output target (default 355)
-      /compresssettings reset              — restore all defaults
-    """
-    args = message.text.split()
-    cs   = _get_compress_settings()
+    # Owner + Admin
+    app.add_handler(CommandHandler("broadcast", broadcast_cmd))
 
-    def _fmt() -> str:
-        enabled = "✅ Enabled" if _auto_compress_enabled() else "❌ Disabled"
-        return (
-            f"🗜 **Auto-Compress Settings**\n\n"
-            f"Status : {enabled}\n"
-            f"Trigger: `{cs['min_mb']} MB` – `{cs['max_mb']} MB`\n"
-            f"Target : `{cs['target_mb']} MB` (≤360 MB recommended)\n"
-            f"Resolution: 640p → 576p fallback\n\n"
-            f"**Commands:**\n"
-            f"`/compresssettings min <MB>`    — lower trigger\n"
-            f"`/compresssettings max <MB>`    — upper trigger\n"
-            f"`/compresssettings target <MB>` — output size\n"
-            f"`/compresssettings reset`       — restore defaults\n"
-            f"`/autocompress Yes/No`          — enable/disable"
-        )
+    app.add_handler(CommandHandler("cancel", cancel_cmd))
 
-    # No subcommand — just show status
-    if len(args) < 2:
-        return await message.reply_text(_fmt())
+    # Premium (owner/admin only)
+    app.add_handler(CommandHandler("premium_add", premium_add_cmd))
+    app.add_handler(CommandHandler("premium_expire", premium_expire_cmd))
 
-    sub = args[1].lower()
+    # Owner only
+    app.add_handler(CommandHandler("setdefaultaudio", setdefaultaudio_cmd))
+    app.add_handler(CommandHandler("setowner", setowner_cmd))
+    app.add_handler(CommandHandler("addadmin", addadmin_cmd))
+    app.add_handler(CommandHandler("removeadmin", removeadmin_cmd))
+    app.add_handler(CommandHandler("adminlist", adminlist_cmd))
+    app.add_handler(CommandHandler("proxy", proxy_cmd))
+    app.add_handler(CommandHandler("left", left_cmd))
+    app.add_handler(CommandHandler("right", right_cmd))
+    app.add_handler(CommandHandler("refreshpl", refreshpl_cmd))
 
-    if sub == "reset":
-        _update_compress_settings(min_mb=800, max_mb=1024, target_mb=355)
-        cs = _get_compress_settings()
-        return await message.reply_text(f"✅ **Defaults restored.**\n\n{_fmt()}")
+    app.add_handler(CallbackQueryHandler(category_callback, pattern="^cat_"))
+    app.add_handler(CallbackQueryHandler(back_callback, pattern="^back_"))
+    app.add_handler(CallbackQueryHandler(howto_verify_callback, pattern="^howto_verify$"))
+    app.add_handler(CallbackQueryHandler(rec_aspect_callback, pattern=r"^rec_aspect:"))
+    app.add_handler(CallbackQueryHandler(ott_quality_callback, pattern=r"^ott_quality:"))
+    app.add_handler(CallbackQueryHandler(rec_audio_callback, pattern=r"^rec_audio:"))
+    app.add_handler(CallbackQueryHandler(rec_watermark_callback, pattern=r"^rec_wm:"))
+    app.add_handler(CallbackQueryHandler(ott_watermark_callback, pattern=r"^ott_wm:"))
+    app.add_handler(CallbackQueryHandler(rec_progress_callback, pattern=r"^progress:"))
+    app.add_handler(CallbackQueryHandler(rec_progress_callback, pattern=r"^progress$"))
+    app.add_handler(CallbackQueryHandler(rec_cancel_callback,   pattern=r"^cancel:"))
+    app.add_handler(CallbackQueryHandler(rec_cancel_callback,   pattern=r"^cancel$"))
+    app.add_handler(CallbackQueryHandler(merge_mode_callback, pattern=r"^merge:"))
+    app.add_handler(CallbackQueryHandler(
+        stream_extractor_callback, pattern=r"^stream_extract:"
+    ))
+    app.add_handler(CallbackQueryHandler(
+        stream_extractor_callback, pattern=r"^stream_extractor_cancel:"
+    ))
+    app.add_handler(CallbackQueryHandler(
+        stream_custom_toggle_callback, pattern=r"^stream_custom_toggle:"
+    ))
+    app.add_handler(CallbackQueryHandler(
+        stream_custom_done_callback, pattern=r"^stream_custom_done:"
+    ))
+    app.add_handler(CallbackQueryHandler(
+        screenshot_callback, pattern=r"^screenshot:"
+    ))
+    app.add_handler(CallbackQueryHandler(
+        screenshot_cancel_callback, pattern=r"^screenshot_cancel:"
+    ))
+    app.add_handler(CallbackQueryHandler(
+        default_audio_select_callback, pattern=r"^default_audio_select:"
+    ))
+    app.add_handler(CallbackQueryHandler(
+        default_audio_cancel_callback, pattern=r"^default_audio_cancel:"
+    ))
+    app.add_handler(MessageHandler(
+        (filters.AUDIO | filters.Document.AUDIO) & ~filters.COMMAND,
+        merge_audio_message_handler,
+    ))
+    app.add_handler(MessageHandler(
+        (filters.VIDEO | filters.Document.VIDEO) & ~filters.COMMAND,
+        media_merge_video_handler,
+    ), group=1)
+    # Capture watermark URL pasted by owner after clicking "Change Watermark Link"
+    app.add_handler(MessageHandler(
+        filters.TEXT & ~filters.COMMAND & filters.User(int(BOT_OWNER_ID)) if BOT_OWNER_ID else filters.TEXT & ~filters.COMMAND,
+        ott_watermark_url_message_handler,
+    ), group=0)
+    # Capture the DishTV watermark URL pasted by the owner after clicking
+    # "Change Watermark Link".
+    app.add_handler(MessageHandler(
+        filters.TEXT & ~filters.COMMAND & filters.User(int(BOT_OWNER_ID)) if BOT_OWNER_ID else filters.TEXT & ~filters.COMMAND,
+        watermark_url_message_handler,
+    ), group=1)
+    # Cookie uploads are handled after existing media document handlers so
+    # normal audio/video merge behavior is not intercepted.
+    app.add_handler(MessageHandler(
+        filters.Document.ALL & ~filters.COMMAND,
+        cookies_document_handler,
+    ), group=2)
+    app.add_handler(CallbackQueryHandler(qualitymax_callback, pattern=r"^qualitymax:"))
 
-    if sub in ("min", "max", "target") and len(args) >= 3:
-        try:
-            val = int(args[2])
-        except ValueError:
-            return await message.reply_text("❌ Value must be a whole number in MB.")
+    # Auto-register bot commands with Telegram (shows in "/" menu)
+    commands = [
+        BotCommand("start",    "View bot information and commands"),
+        BotCommand("help",     "View bot information and commands"),
+        BotCommand("qualitymax", "Convert replied video quality"),
+        BotCommand("merge_video_and_audio", "Merge video and audio"),
+        BotCommand("download", "Download a video from a URL"),
+        BotCommand("drec", "Record a direct stream"),
+        BotCommand("compress", "Compress a replied video"),
+        BotCommand("compressadvance", "Compress a replied video to 576p"),
+        BotCommand("screenshot", "Take screenshots from a replied video"),
+        BotCommand("trim", "Trim a replied video"),
+        BotCommand("merge", "Merge two videos"),
+        BotCommand("watermark", "Add a watermark to a replied video"),
+        BotCommand("audiotrack", "Remux audio tracks in a replied video"),
+        BotCommand("setdefaultaudio", "Set the default audio label (Owner)"),
+        BotCommand("streamextractor", "Extract audio, subtitles, and streams"),
+        BotCommand("verify",   "Unlock access for 40 minutes"),
+        BotCommand("set_cookies", "Upload OTT cookies.txt"),
+        BotCommand("cookies_status", "Show stored cookies"),
+        BotCommand("del_cookies", "Delete stored cookies"),
+        BotCommand("rec",      "Catchup/recording link lo"),
+        BotCommand("dl",       "DVR recording/download lo"),
+        BotCommand("schedule", "Schedule a future recording"),
+        BotCommand("channels", "View the channel list"),
+        BotCommand("search",   "Search for a channel"),
+        BotCommand("myinfo",   "View your information"),
+        BotCommand("public", "Enable Public Mode (Owner)"),
+        BotCommand("private", "Enable Private Mode (Owner)"),
+        BotCommand("broadcast","(Admin) Send a message to everyone"),
+        BotCommand("cancel",   "Cancel a recording"),
+        BotCommand("premium_add", "Owner/Admin premium add kare"),
+        BotCommand("premium_expire", "Owner/Admin premium expire kare"),
+        BotCommand("left",       "(Owner) Set the left watermark position"),
+        BotCommand("right",      "(Owner) Set the right watermark position"),
+        BotCommand("refreshpl",  "(Owner) Force-refresh the DishTV GitHub playlist"),
+    ]
+    async def post_init(application):
+        global SCHEDULE_MANAGER_TASK
+        await application.bot.set_my_commands(commands)
+        if SCHEDULE_MANAGER_TASK is None or SCHEDULE_MANAGER_TASK.done():
+            SCHEDULE_MANAGER_TASK = asyncio.create_task(
+                _scheduled_recording_manager(application)
+            )
+            logger.info(
+                "Scheduled recording manager started; %s saved schedule(s) loaded.",
+                len(SCHEDULED_RECORDINGS),
+            )
+        logger.info("Bot commands registered with Telegram.")
 
-        if sub == "min":
-            if val < 100 or val >= cs["max_mb"]:
-                return await message.reply_text(
-                    f"❌ `min` must be ≥ 100 MB and less than current `max` ({cs['max_mb']} MB)."
-                )
-            _update_compress_settings(min_mb=val)
-            cs["min_mb"] = val
-        elif sub == "max":
-            if val <= cs["min_mb"] or val > 4096:
-                return await message.reply_text(
-                    f"❌ `max` must be > current `min` ({cs['min_mb']} MB) and ≤ 4096 MB."
-                )
-            _update_compress_settings(max_mb=val)
-            cs["max_mb"] = val
-        elif sub == "target":
-            if val < 50 or val > 2000:
-                return await message.reply_text("❌ `target` must be between 50 MB and 2000 MB.")
-            _update_compress_settings(target_mb=val)
-            cs["target_mb"] = val
+    app.post_init = post_init
 
-        return await message.reply_text(f"✅ **Updated.**\n\n{_fmt()}")
+    logger.info("JioTV Telegram Bot is starting...")
+    app.run_polling(allowed_updates=Update.ALL_TYPES)
 
-    # Unrecognised subcommand
-    await message.reply_text(_fmt())
-
-
-# ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    print("Starting Video Recorder Bot...")
-    LOG.info("OWNER_IDS loaded: %d ID(s) — %s", len(OWNER_IDS), OWNER_IDS if OWNER_IDS else "NONE (no owner set!)")
-    LOG.info("AUTH_USERS loaded: %d ID(s)", len(AUTH_USERS))
-    sweep_old_downloads()
-    LOG.info(
-        "Recordings will be auto-deleted from the server after %s.",
-        _retention_label(),
-    )
-    app.run()
+    main()
