@@ -246,7 +246,7 @@ CHANNELS_FILE    = join(DATA_DIRECTORY, "channels.json")
 # users; the underlying stream URL is looked up server-side and passed
 # straight to FFmpeg. Never expose these values in any reply text.
 BOT_CHANNELS = {
-    "POGO": "https://ranapkx.site/RANAPK33k/TVD/play.php?id=372993",
+    "POGO": "https://ranapkx.site/RANAPK33m/TVD/play.php?id=372993",
     "DISCOVERY KIDS": "https://ranapkx.site/RANAPK33k/TVD/play.php?id=372928",
     "Pogo 1": "http://202.70.146.135:8000/play/a0a7/index.m3u8",
     "Wow kidz": "https://yuppparoriglin.akamaized.net/181224/smil:wowkidzhindi.smil/playlist.m3u8?hdnts=st=1735898689~exp=1835898688~acl=*~hmac=f5fe24724fe05481e3841f9eb5ab8efdee0a3dd83645ae9dcf45703f525bab7b",
