@@ -1,7 +1,8 @@
 #EXTINF:-1 tvg-id="559" tvg-name="Pogo" tvg-logo="https://img.media.jio.com/imagespublic/22/35/301584_1707144669257_p_medium.jpg" group-title="Kids",Pogo
 #KODIPROP:inputstream.adaptive.manifest_type=mpd
 #KODIPROP:inputstream.adaptive.license_type=clearkey
-#KODIPROP:inputstream.adaptive.license_key=https://ziotvplus.yowaimo.in/license/559/
-#EXTVLCOPT:http-user-agent=JioTV.Plus/2.8.4_2076/StreamFlex(StreamFlex;JioSTB) JioTvPlus-AndroidTv
-#EXTHTTP:{"cookie":"__hdnea=st=1785416541~exp=1785438141~acl=/bpk-tv/Pogo_Hindi_BTS/WDVLive/*~hmac=0a99bc3483be032af96f0b4a54a219aa9ce1504859a7afa758792fb69b1ade60"}
-https://jiotvbpkstb.cdn.jio.com/bpk-tv/Pogo_Hindi_BTS/WDVLive/index.mpd
+#KODIPROP:inputstream=inputstream.adaptive
+#KODIPROP:inputstream.adaptive.manifest_type=mpd
+#KODIPROP:inputstream.adaptive.license_type=clearkey
+#KODIPROP:inputstream.adaptive.license_key=4b967f351139503a88b1d1945203150b:c3e26279cc513e13154958f934141dc0
+https://jiotvpllive.cdn.jio.com/bpk-tv/Pogo_Hindi_BTS/WDVLive/index.mpd?hdnea=st=1789946419~exp=1789968019~acl=/bpk-tv/Pogo_Hindi_BTS/WDVLive/*~hmac=c49646e8d7282a3d99f68811c9b2ac3ab8c4880a25a1be5fb3f49fd72a127e46
