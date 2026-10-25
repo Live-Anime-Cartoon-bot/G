@@ -13,3 +13,10 @@ http://103.151.60.162:2122/play/a01e/index.m3u8
 http://103.151.60.162:2122/play/a02v/index.m3u8
 #EXTINF:-1 group-title="-",nick jr
 http://103.151.60.162:2122/play/a00s/index.m3u8
+#EXTINF:-1 tvg-id="559" tvg-name="Pogo Hindi" tvg-logo="https://jiotv.catchup.cdn.jio.com/dare_images/images/Pogo_Hindi.png" group-title="Kids",Pogo Hindi
+#KODIPROP:inputstream.adaptive.manifest_type=mpd
+#KODIPROP:inputstream.adaptive.license_type=clearkey
+#KODIPROP:inputstream.adaptive.license_key=d19984624fc15209b3cb5cf3bf99232f:baca6aa9494ed43cf02975eda742eeab
+#EXTVLCOPT:http-user-agent=Premium Plugx
+#EXTHTTP:{"cookie":"hdnea=st=1792917428~exp=1792939028~acl=/*~hmac=dfc1cba0fd734800c12709240b11b93a8442df79d417f1f22386dee79c7c70a4"}
+https://jiotvmblive.cdn.jio.com/bpk-tv/Pogo_Hindi_MOB/WDVLive/index.mpd
