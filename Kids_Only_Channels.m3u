@@ -2,30 +2,6 @@
 #KODIPROP:inputstream=inputstream.adaptive
 #KODIPROP:inputstream.adaptive.manifest_type=mpd
 #KODIPROP:inputstream.adaptive.license_type=com.widevine.alpha
-#KODIPROP:inputstream.adaptive.license_key=http://223.25.71.211:5001/live/key/166
-#EXTINF:-1 tvg-id="166" tvg-name="Cartoon Network Telugu" tvg-logo="http://223.25.71.211:5001/jtvimage/CNTelugu1.png" tvg-language="Telugu" group-title="Kids",Cartoon Network Telugu
-http://223.25.71.211:5001/live/mpd/166
-#KODIPROP:inputstream=inputstream.adaptive
-#KODIPROP:inputstream.adaptive.manifest_type=mpd
-#KODIPROP:inputstream.adaptive.license_type=com.widevine.alpha
-#KODIPROP:inputstream.adaptive.license_key=http://223.25.71.211:5001/live/key/290
-#EXTINF:-1 tvg-id="290" tvg-name="sonic Tamil" tvg-logo="http://223.25.71.211:5001/jtvimage/sonic_Tamil.png" tvg-language="Tamil" group-title="Kids",sonic Tamil
-http://223.25.71.211:5001/live/mpd/290
-#KODIPROP:inputstream=inputstream.adaptive
-#KODIPROP:inputstream.adaptive.manifest_type=mpd
-#KODIPROP:inputstream.adaptive.license_type=com.widevine.alpha
-#KODIPROP:inputstream.adaptive.license_key=http://223.25.71.211:5001/live/key/542
-#EXTINF:-1 tvg-id="542" tvg-name="Pogo Tamil" tvg-logo="http://223.25.71.211:5001/jtvimage/Pogo_Tamil.png" tvg-language="Tamil" group-title="Kids",Pogo Tamil
-http://223.25.71.211:5001/live/mpd/542
-#KODIPROP:inputstream=inputstream.adaptive
-#KODIPROP:inputstream.adaptive.manifest_type=mpd
-#KODIPROP:inputstream.adaptive.license_type=com.widevine.alpha
-#KODIPROP:inputstream.adaptive.license_key=http://223.25.71.211:5001/live/key/543
-#EXTINF:-1 tvg-id="543" tvg-name="Nick Telugu" tvg-logo="http://223.25.71.211:5001/jtvimage/Nick_Telugu.png" tvg-language="Telugu" group-title="Kids",Nick Telugu
-http://223.25.71.211:5001/live/mpd/543
-#KODIPROP:inputstream=inputstream.adaptive
-#KODIPROP:inputstream.adaptive.manifest_type=mpd
-#KODIPROP:inputstream.adaptive.license_type=com.widevine.alpha
 #KODIPROP:inputstream.adaptive.license_key=http://223.25.71.211:5001/live/key/544
 #EXTINF:-1 tvg-id="544" tvg-name="Nick Junior" tvg-logo="http://223.25.71.211:5001/jtvimage/Nick_Junior.png" tvg-language="English" group-title="Kids",Nick Junior
 http://223.25.71.211:5001/live/mpd/544
@@ -51,10 +27,6 @@ http://223.25.71.211:5001/live/mpd/548
 #KODIPROP:inputstream.adaptive.manifest_type=mpd
 #KODIPROP:inputstream.adaptive.license_type=com.widevine.alpha
 #KODIPROP:inputstream.adaptive.license_key=http://223.25.71.211:5001/live/key/550
-#EXTINF:-1 tvg-id="550" tvg-name="Discovery Kids Tamil" tvg-logo="http://223.25.71.211:5001/jtvimage/DiscoveryKidsTam1.png" tvg-language="Tamil" group-title="Kids",Discovery Kids Tamil
-http://223.25.71.211:5001/live/mpd/550
-#EXTINF:-1 tvg-id="551" tvg-name="TEST14 HD" tvg-logo="http://223.25.71.211:5001/jtvimage/TEST14_HD.png" tvg-language="English" group-title="Kids",TEST14 HD
-http://223.25.71.211:5001/live/551.m3u8
 #KODIPROP:inputstream=inputstream.adaptive
 #KODIPROP:inputstream.adaptive.manifest_type=mpd
 #KODIPROP:inputstream.adaptive.license_type=com.widevine.alpha
@@ -107,108 +79,18 @@ http://223.25.71.211:5001/live/mpd/816
 #KODIPROP:inputstream.adaptive.manifest_type=mpd
 #KODIPROP:inputstream.adaptive.license_type=com.widevine.alpha
 #KODIPROP:inputstream.adaptive.license_key=http://223.25.71.211:5001/live/key/817
-#EXTINF:-1 tvg-id="817" tvg-name="Cartoon Network Tamil" tvg-logo="http://223.25.71.211:5001/jtvimage/CNTamil1.png" tvg-language="Tamil" group-title="Kids",Cartoon Network Tamil
-http://223.25.71.211:5001/live/mpd/817
-#KODIPROP:inputstream=inputstream.adaptive
-#KODIPROP:inputstream.adaptive.manifest_type=mpd
-#KODIPROP:inputstream.adaptive.license_type=com.widevine.alpha
-#KODIPROP:inputstream.adaptive.license_key=http://223.25.71.211:5001/live/key/872
 #EXTINF:-1 tvg-id="872" tvg-name="Sony Yay Hindi" tvg-logo="http://223.25.71.211:5001/jtvimage/SonyYAYHin.png" tvg-language="Hindi" group-title="Kids",Sony Yay Hindi
 http://223.25.71.211:5001/live/mpd/872
 #KODIPROP:inputstream=inputstream.adaptive
 #KODIPROP:inputstream.adaptive.manifest_type=mpd
 #KODIPROP:inputstream.adaptive.license_type=com.widevine.alpha
 #KODIPROP:inputstream.adaptive.license_key=http://223.25.71.211:5001/live/key/873
-#EXTINF:-1 tvg-id="873" tvg-name="Sony Yay Tamil" tvg-logo="http://223.25.71.211:5001/jtvimage/SonyYAYTam.png" tvg-language="Tamil" group-title="Kids",Sony Yay Tamil
-http://223.25.71.211:5001/live/mpd/873
-#KODIPROP:inputstream=inputstream.adaptive
-#KODIPROP:inputstream.adaptive.manifest_type=mpd
-#KODIPROP:inputstream.adaptive.license_type=com.widevine.alpha
-#KODIPROP:inputstream.adaptive.license_key=http://223.25.71.211:5001/live/key/874
-#EXTINF:-1 tvg-id="874" tvg-name="Sony Yay Telugu" tvg-logo="http://223.25.71.211:5001/jtvimage/SonyYAYTel.png" tvg-language="Telugu" group-title="Kids",Sony Yay Telugu
-http://223.25.71.211:5001/live/mpd/874
-#KODIPROP:inputstream=inputstream.adaptive
-#KODIPROP:inputstream.adaptive.manifest_type=mpd
-#KODIPROP:inputstream.adaptive.license_type=com.widevine.alpha
-#KODIPROP:inputstream.adaptive.license_key=http://223.25.71.211:5001/live/key/1079
-#EXTINF:-1 tvg-id="1079" tvg-name="Cartoon Network HD+ English" tvg-logo="http://223.25.71.211:5001/jtvimage/CNHDEnglish1.png" tvg-language="English" group-title="Kids",Cartoon Network HD+ English
-http://223.25.71.211:5001/live/mpd/1079
-#KODIPROP:inputstream=inputstream.adaptive
-#KODIPROP:inputstream.adaptive.manifest_type=mpd
-#KODIPROP:inputstream.adaptive.license_type=com.widevine.alpha
-#KODIPROP:inputstream.adaptive.license_key=http://223.25.71.211:5001/live/key/1080
-#EXTINF:-1 tvg-id="1080" tvg-name="Cartoon Network HD+ Telugu" tvg-logo="http://223.25.71.211:5001/jtvimage/CNHDTelugu1.png" tvg-language="Telugu" group-title="Kids",Cartoon Network HD+ Telugu
-http://223.25.71.211:5001/live/mpd/1080
-#KODIPROP:inputstream=inputstream.adaptive
-#KODIPROP:inputstream.adaptive.manifest_type=mpd
-#KODIPROP:inputstream.adaptive.license_type=com.widevine.alpha
-#KODIPROP:inputstream.adaptive.license_key=http://223.25.71.211:5001/live/key/1081
-#EXTINF:-1 tvg-id="1081" tvg-name="Cartoon Network HD+ Tamil" tvg-logo="http://223.25.71.211:5001/jtvimage/CNHDTamil1.png" tvg-language="Tamil" group-title="Kids",Cartoon Network HD+ Tamil
-http://223.25.71.211:5001/live/mpd/1081
-#KODIPROP:inputstream=inputstream.adaptive
-#KODIPROP:inputstream.adaptive.manifest_type=mpd
-#KODIPROP:inputstream.adaptive.license_type=com.widevine.alpha
-#KODIPROP:inputstream.adaptive.license_key=http://223.25.71.211:5001/live/key/1226
 #EXTINF:-1 tvg-id="1226" tvg-name="Nick HD+" tvg-logo="http://223.25.71.211:5001/jtvimage/Nick_HD_Plus.png" tvg-language="English" group-title="Kids",Nick HD+
 http://223.25.71.211:5001/live/mpd/1226
 #KODIPROP:inputstream=inputstream.adaptive
 #KODIPROP:inputstream.adaptive.manifest_type=mpd
 #KODIPROP:inputstream.adaptive.license_type=com.widevine.alpha
 #KODIPROP:inputstream.adaptive.license_key=http://223.25.71.211:5001/live/key/1242
-#EXTINF:-1 tvg-id="1242" tvg-name="Sonic Telugu" tvg-logo="http://223.25.71.211:5001/jtvimage/Sonic_Telugu.png" tvg-language="Telugu" group-title="Kids",Sonic Telugu
-http://223.25.71.211:5001/live/mpd/1242
-#KODIPROP:inputstream=inputstream.adaptive
-#KODIPROP:inputstream.adaptive.manifest_type=mpd
-#KODIPROP:inputstream.adaptive.license_type=com.widevine.alpha
-#KODIPROP:inputstream.adaptive.license_key=http://223.25.71.211:5001/live/key/1243
-#EXTINF:-1 tvg-id="1243" tvg-name="Sonic Kannada" tvg-logo="http://223.25.71.211:5001/jtvimage/Sonic_Kannada.png" tvg-language="Kannada" group-title="Kids",Sonic Kannada
-http://223.25.71.211:5001/live/mpd/1243
-#KODIPROP:inputstream=inputstream.adaptive
-#KODIPROP:inputstream.adaptive.manifest_type=mpd
-#KODIPROP:inputstream.adaptive.license_type=com.widevine.alpha
-#KODIPROP:inputstream.adaptive.license_key=http://223.25.71.211:5001/live/key/1244
-#EXTINF:-1 tvg-id="1244" tvg-name="Nick Kannada" tvg-logo="http://223.25.71.211:5001/jtvimage/Nick_Kannada.png" tvg-language="Kannada" group-title="Kids",Nick Kannada
-http://223.25.71.211:5001/live/mpd/1244
-#KODIPROP:inputstream=inputstream.adaptive
-#KODIPROP:inputstream.adaptive.manifest_type=mpd
-#KODIPROP:inputstream.adaptive.license_type=com.widevine.alpha
-#KODIPROP:inputstream.adaptive.license_key=http://223.25.71.211:5001/live/key/1340
-#EXTINF:-1 tvg-id="1340" tvg-name="Nick Malayalam" tvg-logo="http://223.25.71.211:5001/jtvimage/Nick_Malayalam.png" tvg-language="Malayalam" group-title="Kids",Nick Malayalam
-http://223.25.71.211:5001/live/mpd/1340
-#KODIPROP:inputstream=inputstream.adaptive
-#KODIPROP:inputstream.adaptive.manifest_type=mpd
-#KODIPROP:inputstream.adaptive.license_type=com.widevine.alpha
-#KODIPROP:inputstream.adaptive.license_key=http://223.25.71.211:5001/live/key/1341
-#EXTINF:-1 tvg-id="1341" tvg-name="Nick Bangla" tvg-logo="http://223.25.71.211:5001/jtvimage/Nick_Bangla.png" tvg-language="Bengali" group-title="Kids",Nick Bangla
-http://223.25.71.211:5001/live/mpd/1341
-#KODIPROP:inputstream=inputstream.adaptive
-#KODIPROP:inputstream.adaptive.manifest_type=mpd
-#KODIPROP:inputstream.adaptive.license_type=com.widevine.alpha
-#KODIPROP:inputstream.adaptive.license_key=http://223.25.71.211:5001/live/key/1342
-#EXTINF:-1 tvg-id="1342" tvg-name="Nick Marathi" tvg-logo="http://223.25.71.211:5001/jtvimage/Nick_Marathi.png" tvg-language="Marathi" group-title="Kids",Nick Marathi
-http://223.25.71.211:5001/live/mpd/1342
-#KODIPROP:inputstream=inputstream.adaptive
-#KODIPROP:inputstream.adaptive.manifest_type=mpd
-#KODIPROP:inputstream.adaptive.license_type=com.widevine.alpha
-#KODIPROP:inputstream.adaptive.license_key=http://223.25.71.211:5001/live/key/1344
-#EXTINF:-1 tvg-id="1344" tvg-name="Sonic Malayalam" tvg-logo="http://223.25.71.211:5001/jtvimage/Sonic_Malayalam.png" tvg-language="Malayalam" group-title="Kids",Sonic Malayalam
-http://223.25.71.211:5001/live/mpd/1344
-#KODIPROP:inputstream=inputstream.adaptive
-#KODIPROP:inputstream.adaptive.manifest_type=mpd
-#KODIPROP:inputstream.adaptive.license_type=com.widevine.alpha
-#KODIPROP:inputstream.adaptive.license_key=http://223.25.71.211:5001/live/key/1345
-#EXTINF:-1 tvg-id="1345" tvg-name="Sonic Bangla" tvg-logo="http://223.25.71.211:5001/jtvimage/Sonic_Bangla.png" tvg-language="Bengali" group-title="Kids",Sonic Bangla
-http://223.25.71.211:5001/live/mpd/1345
-#KODIPROP:inputstream=inputstream.adaptive
-#KODIPROP:inputstream.adaptive.manifest_type=mpd
-#KODIPROP:inputstream.adaptive.license_type=com.widevine.alpha
-#KODIPROP:inputstream.adaptive.license_key=http://223.25.71.211:5001/live/key/1346
-#EXTINF:-1 tvg-id="1346" tvg-name="Sonic Marathi" tvg-logo="http://223.25.71.211:5001/jtvimage/Sonic_Marathi.png" tvg-language="Marathi" group-title="Kids",Sonic Marathi
-http://223.25.71.211:5001/live/mpd/1346
-#KODIPROP:inputstream=inputstream.adaptive
-#KODIPROP:inputstream.adaptive.manifest_type=mpd
-#KODIPROP:inputstream.adaptive.license_type=com.widevine.alpha
-#KODIPROP:inputstream.adaptive.license_key=http://223.25.71.211:5001/live/key/1373
 #EXTINF:-1 tvg-id="1373" tvg-name="Disney Channel" tvg-logo="http://223.25.71.211:5001/jtvimage/Disney_Channel.png" tvg-language="Hindi" group-title="Kids",Disney Channel
 http://223.25.71.211:5001/live/mpd/1373
 #KODIPROP:inputstream=inputstream.adaptive
@@ -245,100 +127,24 @@ http://223.25.71.211:5001/live/mpd/1780
 #KODIPROP:inputstream.adaptive.manifest_type=mpd
 #KODIPROP:inputstream.adaptive.license_type=com.widevine.alpha
 #KODIPROP:inputstream.adaptive.license_key=http://223.25.71.211:5001/live/key/1883
-#EXTINF:-1 tvg-id="1883" tvg-name="Pogo Telugu" tvg-logo="http://223.25.71.211:5001/jtvimage/Pogo_Telugu.png" tvg-language="Telugu" group-title="Kids",Pogo Telugu
-http://223.25.71.211:5001/live/mpd/1883
-#KODIPROP:inputstream=inputstream.adaptive
-#KODIPROP:inputstream.adaptive.manifest_type=mpd
-#KODIPROP:inputstream.adaptive.license_type=com.widevine.alpha
-#KODIPROP:inputstream.adaptive.license_key=http://223.25.71.211:5001/live/key/2774
 #EXTINF:-1 tvg-id="2774" tvg-name="Power Kids TV" tvg-logo="http://223.25.71.211:5001/jtvimage/PowerKidsTV1.png" tvg-language="Hindi" group-title="Kids",Power Kids TV
 http://223.25.71.211:5001/live/mpd/2774
 #KODIPROP:inputstream=inputstream.adaptive
 #KODIPROP:inputstream.adaptive.manifest_type=mpd
 #KODIPROP:inputstream.adaptive.license_type=com.widevine.alpha
 #KODIPROP:inputstream.adaptive.license_key=http://223.25.71.211:5001/live/key/3032
-#EXTINF:-1 tvg-id="3032" tvg-name="Pogo Kannada" tvg-logo="http://223.25.71.211:5001/jtvimage/Pogo_Kan.png" tvg-language="Kannada" group-title="Kids",Pogo Kannada
-http://223.25.71.211:5001/live/mpd/3032
-#KODIPROP:inputstream=inputstream.adaptive
-#KODIPROP:inputstream.adaptive.manifest_type=mpd
-#KODIPROP:inputstream.adaptive.license_type=com.widevine.alpha
-#KODIPROP:inputstream.adaptive.license_key=http://223.25.71.211:5001/live/key/3033
-#EXTINF:-1 tvg-id="3033" tvg-name="Pogo Malayalam" tvg-logo="http://223.25.71.211:5001/jtvimage/Pogo_Mal.png" tvg-language="Malayalam" group-title="Kids",Pogo Malayalam
-http://223.25.71.211:5001/live/mpd/3033
-#KODIPROP:inputstream=inputstream.adaptive
-#KODIPROP:inputstream.adaptive.manifest_type=mpd
-#KODIPROP:inputstream.adaptive.license_type=com.widevine.alpha
-#KODIPROP:inputstream.adaptive.license_key=http://223.25.71.211:5001/live/key/3034
-#EXTINF:-1 tvg-id="3034" tvg-name="Pogo Marathi" tvg-logo="http://223.25.71.211:5001/jtvimage/Pogo_Mar.png" tvg-language="Marathi" group-title="Kids",Pogo Marathi
-http://223.25.71.211:5001/live/mpd/3034
-#KODIPROP:inputstream=inputstream.adaptive
-#KODIPROP:inputstream.adaptive.manifest_type=mpd
-#KODIPROP:inputstream.adaptive.license_type=com.widevine.alpha
-#KODIPROP:inputstream.adaptive.license_key=http://223.25.71.211:5001/live/key/3035
-#EXTINF:-1 tvg-id="3035" tvg-name="Cartoon Network Kannada" tvg-logo="http://223.25.71.211:5001/jtvimage/CNKannada.png" tvg-language="Kannada" group-title="Kids",Cartoon Network Kannada
-http://223.25.71.211:5001/live/mpd/3035
-#KODIPROP:inputstream=inputstream.adaptive
-#KODIPROP:inputstream.adaptive.manifest_type=mpd
-#KODIPROP:inputstream.adaptive.license_type=com.widevine.alpha
-#KODIPROP:inputstream.adaptive.license_key=http://223.25.71.211:5001/live/key/3036
-#EXTINF:-1 tvg-id="3036" tvg-name="Cartoon Network Malayalam" tvg-logo="http://223.25.71.211:5001/jtvimage/CNMalayalam1.png" tvg-language="Malayalam" group-title="Kids",Cartoon Network Malayalam
-http://223.25.71.211:5001/live/mpd/3036
-#EXTINF:-1 tvg-id="3321" tvg-name="ZB Cartoon" tvg-logo="http://223.25.71.211:5001/jtvimage/zbcatun.png" tvg-language="Bengali" group-title="Kids",ZB Cartoon
-http://223.25.71.211:5001/live/3321.m3u8
-#KODIPROP:inputstream=inputstream.adaptive
-#KODIPROP:inputstream.adaptive.manifest_type=mpd
-#KODIPROP:inputstream.adaptive.license_type=com.widevine.alpha
-#KODIPROP:inputstream.adaptive.license_key=http://223.25.71.211:5001/live/key/3385
 #EXTINF:-1 tvg-id="3385" tvg-name="Epic Kids" tvg-logo="http://223.25.71.211:5001/jtvimage/Gubbare.png" tvg-language="Hindi" group-title="Kids",Epic Kids
 http://223.25.71.211:5001/live/mpd/3385
 #KODIPROP:inputstream=inputstream.adaptive
 #KODIPROP:inputstream.adaptive.manifest_type=mpd
 #KODIPROP:inputstream.adaptive.license_type=com.widevine.alpha
 #KODIPROP:inputstream.adaptive.license_key=http://223.25.71.211:5001/live/key/3433
-#EXTINF:-1 tvg-id="3433" tvg-name="Discovery Kids Kannada" tvg-logo="http://223.25.71.211:5001/jtvimage/DiscoveryKidsKan1.png" tvg-language="Kannada" group-title="Kids",Discovery Kids Kannada
-http://223.25.71.211:5001/live/mpd/3433
-#KODIPROP:inputstream=inputstream.adaptive
-#KODIPROP:inputstream.adaptive.manifest_type=mpd
-#KODIPROP:inputstream.adaptive.license_type=com.widevine.alpha
-#KODIPROP:inputstream.adaptive.license_key=http://223.25.71.211:5001/live/key/3436
 #EXTINF:-1 tvg-id="3436" tvg-name="Cartoon Network HD+ Hindi" tvg-logo="http://223.25.71.211:5001/jtvimage/CNHDHindi1.png" tvg-language="Hindi" group-title="Kids",Cartoon Network HD+ Hindi
 http://223.25.71.211:5001/live/mpd/3436
 #KODIPROP:inputstream=inputstream.adaptive
 #KODIPROP:inputstream.adaptive.manifest_type=mpd
 #KODIPROP:inputstream.adaptive.license_type=com.widevine.alpha
 #KODIPROP:inputstream.adaptive.license_key=http://223.25.71.211:5001/live/key/3447
-#EXTINF:-1 tvg-id="3447" tvg-name="Discovery Kids Telugu" tvg-logo="http://223.25.71.211:5001/jtvimage/DiscoveryKidsTel1.png" tvg-language="Telugu" group-title="Kids",Discovery Kids Telugu
-http://223.25.71.211:5001/live/mpd/3447
-#KODIPROP:inputstream=inputstream.adaptive
-#KODIPROP:inputstream.adaptive.manifest_type=mpd
-#KODIPROP:inputstream.adaptive.license_type=com.widevine.alpha
-#KODIPROP:inputstream.adaptive.license_key=http://223.25.71.211:5001/live/key/3448
-#EXTINF:-1 tvg-id="3448" tvg-name="Discovery Kids Malayalam" tvg-logo="http://223.25.71.211:5001/jtvimage/DiscoveryKidsMal1.png" tvg-language="Malayalam" group-title="Kids",Discovery Kids Malayalam
-http://223.25.71.211:5001/live/mpd/3448
-#KODIPROP:inputstream=inputstream.adaptive
-#KODIPROP:inputstream.adaptive.manifest_type=mpd
-#KODIPROP:inputstream.adaptive.license_type=com.widevine.alpha
-#KODIPROP:inputstream.adaptive.license_key=http://223.25.71.211:5001/live/key/3454
-#EXTINF:-1 tvg-id="3454" tvg-name="Cartoon Network Marathi" tvg-logo="http://223.25.71.211:5001/jtvimage/CNMarathi1.png" tvg-language="Marathi" group-title="Kids",Cartoon Network Marathi
-http://223.25.71.211:5001/live/mpd/3454
-#KODIPROP:inputstream=inputstream.adaptive
-#KODIPROP:inputstream.adaptive.manifest_type=mpd
-#KODIPROP:inputstream.adaptive.license_type=com.widevine.alpha
-#KODIPROP:inputstream.adaptive.license_key=http://223.25.71.211:5001/live/key/3455
-#EXTINF:-1 tvg-id="3455" tvg-name="Cartoon Network HD+ Kannada" tvg-logo="http://223.25.71.211:5001/jtvimage/CNHDKannada1.png" tvg-language="Kannada" group-title="Kids",Cartoon Network HD+ Kannada
-http://223.25.71.211:5001/live/mpd/3455
-#KODIPROP:inputstream=inputstream.adaptive
-#KODIPROP:inputstream.adaptive.manifest_type=mpd
-#KODIPROP:inputstream.adaptive.license_type=com.widevine.alpha
-#KODIPROP:inputstream.adaptive.license_key=http://223.25.71.211:5001/live/key/3456
-#EXTINF:-1 tvg-id="3456" tvg-name="Cartoon Network HD+ Malayalam" tvg-logo="http://223.25.71.211:5001/jtvimage/CNHDMalayalam1.png" tvg-language="Malayalam" group-title="Kids",Cartoon Network HD+ Malayalam
-http://223.25.71.211:5001/live/mpd/3456
-#KODIPROP:inputstream=inputstream.adaptive
-#KODIPROP:inputstream.adaptive.manifest_type=mpd
-#KODIPROP:inputstream.adaptive.license_type=com.widevine.alpha
-#KODIPROP:inputstream.adaptive.license_key=http://223.25.71.211:5001/live/key/3457
-#EXTINF:-1 tvg-id="3457" tvg-name="Cartoon Network HD+ Marathi" tvg-logo="http://223.25.71.211:5001/jtvimage/CNHDMarathi1.png" tvg-language="Marathi" group-title="Kids",Cartoon Network HD+ Marathi
-http://223.25.71.211:5001/live/mpd/3457
 #EXTINF:-1 tvg-id="3467" tvg-name="Green Gold TV" tvg-logo="http://223.25.71.211:5001/jtvimage/greengold.png" tvg-language="Hindi" group-title="Kids",Green Gold TV
 http://223.25.71.211:5001/live/3467.m3u8
 #KODIPROP:inputstream=inputstream.adaptive
