@@ -1,8 +1,7 @@
-#EXTINF:-1 tvg-id="559" tvg-name="Pogo" tvg-logo="https://img.media.jio.com/imagespublic/22/35/301584_1707144669257_p_medium.jpg" group-title="Kids",Pogo
-#KODIPROP:inputstream.adaptive.manifest_type=mpd
-#KODIPROP:inputstream.adaptive.license_type=clearkey
+#EXTM3U
+#EXTINF:-1 tvg-id="559" tvg-name="Pogo Hindi" tvg-logo="http://223.25.71.211:5001/jtvimage/Pogo_Hindi.png" tvg-language="Hindi" tvg-type="Kids" group-title="Kids", Pogo Hindi
 #KODIPROP:inputstream=inputstream.adaptive
 #KODIPROP:inputstream.adaptive.manifest_type=mpd
-#KODIPROP:inputstream.adaptive.license_type=clearkey
-#KODIPROP:inputstream.adaptive.license_key=4b967f351139503a88b1d1945203150b:c3e26279cc513e13154958f934141dc0
-https://jiotvpllive.cdn.jio.com/bpk-tv/Pogo_Hindi_BTS/WDVLive/index.mpd?hdnea=st=1789946419~exp=1789968019~acl=/bpk-tv/Pogo_Hindi_BTS/WDVLive/*~hmac=c49646e8d7282a3d99f68811c9b2ac3ab8c4880a25a1be5fb3f49fd72a127e46
+#KODIPROP:inputstream.adaptive.license_type=com.widevine.alpha
+#KODIPROP:inputstream.adaptive.license_key=http://223.25.71.211:5001/live/key/559
+http://223.25.71.211:5001/live/mpd/559
