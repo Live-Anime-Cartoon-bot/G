@@ -1,21 +1,9 @@
 #EXTM3U
-#KODIPROP:inputstream=inputstream.adaptive
-#KODIPROP:inputstream.adaptive.manifest_type=mpd
-#KODIPROP:inputstream.adaptive.license_type=com.widevine.alpha
-#KODIPROP:inputstream.adaptive.license_key=http://223.25.71.211:5001/live/key/544
 #EXTINF:-1 tvg-id="544" tvg-name="Nick Junior" tvg-logo="http://223.25.71.211:5001/jtvimage/Nick_Junior.png" tvg-language="English" group-title="Kids",Nick Junior
-http://223.25.71.211:5001/live/mpd/544
-#KODIPROP:inputstream=inputstream.adaptive
-#KODIPROP:inputstream.adaptive.manifest_type=mpd
-#KODIPROP:inputstream.adaptive.license_type=com.widevine.alpha
-#KODIPROP:inputstream.adaptive.license_key=http://223.25.71.211:5001/live/key/545
+http://223.25.71.211:5001/live/key/545
 #EXTINF:-1 tvg-id="545" tvg-name="Nick Hindi" tvg-logo="http://223.25.71.211:5001/jtvimage/Nick_Hindi.png" tvg-language="Hindi" group-title="Kids",Nick Hindi
-http://223.25.71.211:5001/live/mpd/545
-#KODIPROP:inputstream=inputstream.adaptive
-#KODIPROP:inputstream.adaptive.manifest_type=mpd
-#KODIPROP:inputstream.adaptive.license_type=com.widevine.alpha
-#KODIPROP:inputstream.adaptive.license_key=http://223.25.71.211:5001/live/key/546
-#EXTINF:-1 tvg-id="546" tvg-name="Nick Tamil" tvg-logo="http://223.25.71.211:5001/jtvimage/Nick_Tamil.png" tvg-language="Tamil" group-title="Kids",Nick Tamil
+http://223.25.71.211:5001/live/key/546
+#EXTINF:-2 tvg-id="546" tvg-name="Nick Tamil" tvg-logo="http://223.25.71.211:5001/jtvimage/Nick_Tamil.png" tvg-language="Tamil" group-title="Kids",Nick Tamil
 http://223.25.71.211:5001/live/mpd/546
 #KODIPROP:inputstream=inputstream.adaptive
 #KODIPROP:inputstream.adaptive.manifest_type=mpd
