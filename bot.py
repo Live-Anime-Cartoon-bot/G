@@ -76,8 +76,8 @@ def _parse_int(name: str, raw: str) -> int:
 
 # Keep Telegram credentials in Replit Secrets, not in the source file.
 API_ID        = "29481626"
-API_HASH      = "4892185769903521077c4cea97808b8c"
-BOT_TOKEN     = "8903930756:AAEFHfLMk85zx656MZBGDHGJWjbEOT4kzTs"
+API_HASH      = ""
+BOT_TOKEN     = ":"
 if not API_ID or not API_HASH or not BOT_TOKEN:
     raise RuntimeError("Missing required Replit Secrets: API_ID, API_HASH, BOT_TOKEN")
 AUTH_USERS    = _parse_id_list("AUTH_USERS", _environ.get("AUTH_USERS", ""))
@@ -163,7 +163,7 @@ BOT_USERNAME        = "LittlesinghamMovie_Bot"
 GDRIVE_SA_JSON      = _environ.get("GDRIVE_SA_JSON",      "")
 GDRIVE_FOLDER_ID    = _environ.get("GDRIVE_FOLDER_ID",    "")
 GOOGLE_CLIENT_ID = "1031593100053-dnhnbmqdjudjaplo10ur24lkhe7sqndh.apps.googleusercontent.com"
-GOOGLE_CLIENT_SECRET = "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"
+GOOGLE_CLIENT_SECRET = ""
 
 # ---------------------------------------------------------------------------
 
