@@ -158,12 +158,12 @@ OFFICIAL_ANONYMOUS_GROUP_ID = -1003726271113
 GROUP_INVITE_LINK   = "https://t.me/+ww77CDQwoigzYjk1"
 SHORTENER_API_LINK = "https://shrinkme.io/api"
 SHRINKME_API_KEY    =  "9503d9bf87c90aa9e0aab35d4dec7d1ce24c0a23"
-BOT_USERNAME        = "RECLITTLESINGHAMBOT"
+BOT_USERNAME        = "LittlesinghamMovie_Bot"
 
 GDRIVE_SA_JSON      = _environ.get("GDRIVE_SA_JSON",      "")
 GDRIVE_FOLDER_ID    = _environ.get("GDRIVE_FOLDER_ID",    "")
 GOOGLE_CLIENT_ID = "1031593100053-dnhnbmqdjudjaplo10ur24lkhe7sqndh.apps.googleusercontent.com"
-GOOGLE_CLIENT_SECRET = _environ.get("GOOGLE_CLIENT_SECRET", "")
+GOOGLE_CLIENT_SECRET = "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"
 
 # ---------------------------------------------------------------------------
 
