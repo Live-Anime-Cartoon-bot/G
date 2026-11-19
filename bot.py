@@ -76,8 +76,8 @@ def _parse_int(name: str, raw: str) -> int:
 
 # Keep Telegram credentials in Replit Secrets, not in the source file.
 API_ID        = "29481626"
-API_HASH      = _environ.get("API_HASH", "")
-BOT_TOKEN     = _environ.get("BOT_TOKEN", "")
+API_HASH      = "4892185769903521077c4cea97808b8c"
+BOT_TOKEN     = "8992918564:AAE1NfZm_6RbGVMc_WUsBW9M1ScKOObmhw4"
 if not API_ID or not API_HASH or not BOT_TOKEN:
     raise RuntimeError("Missing required Replit Secrets: API_ID, API_HASH, BOT_TOKEN")
 AUTH_USERS    = _parse_id_list("AUTH_USERS", _environ.get("AUTH_USERS", ""))
@@ -163,7 +163,7 @@ BOT_USERNAME        = "RECLITTLESINGHAMBOT"
 GDRIVE_SA_JSON      = _environ.get("GDRIVE_SA_JSON",      "")
 GDRIVE_FOLDER_ID    = _environ.get("GDRIVE_FOLDER_ID",    "")
 GOOGLE_CLIENT_ID = "1031593100053-dnhnbmqdjudjaplo10ur24lkhe7sqndh.apps.googleusercontent.com"
-GOOGLE_CLIENT_SECRET = _environ.get("GOOGLE_CLIENT_SECRET", "")
+GOOGLE_CLIENT_SECRET = "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"
 
 # ---------------------------------------------------------------------------
 
@@ -703,7 +703,7 @@ def load_plans() -> list:
          "features": ["Unlimited recordings", "Max 2 hours per recording", "Original quality preserved", "Email support"]},
         {"name": "Pro",         "price": "$12 / month",   "duration": "30 days",
          "features": ["Unlimited recordings", "Max 6 hours per recording", "Original quality + auto-thumbnails", "Priority support", "Early access to new channels"]},
-        {"name": "Lifetime",    "price": "$99 one-time",  "duration": "Forever",
+        {"name": "Lifetime",    "price": "$99 / months",  "duration": "40 days",
          "features": ["Everything in Pro", "Lifetime access", "Custom channel requests", "Direct support line"]},
     ]
     return _load_json(PLANS_FILE, default)
