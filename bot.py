@@ -459,7 +459,7 @@ WATERMARK_NAME_FILE    = join(DATA_DIRECTORY, "watermark_name.txt")
 WATERMARK_IMG_FILE     = join(DATA_DIRECTORY, "watermark_img.txt")
 WATERMARK_SIZE_FILE    = join(DATA_DIRECTORY, "watermark_size.txt")
 WATERMARK_IMG_CACHE    = join(DATA_DIRECTORY, "watermark_logo.png")
-DEFAULT_WATERMARK_IMG_URL = "https://iili.io/CuMJCjn.md.png"
+DEFAULT_WATERMARK_IMG_URL = "https://i.ibb.co/M5fDHwG9/62331.png"
 GROUP_CONFIG_FILE   = join(DATA_DIRECTORY, "group_config.json")
 
 # Runtime-mutable group ID (persists to GROUP_CONFIG_FILE)
