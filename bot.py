@@ -76,8 +76,8 @@ def _parse_int(name: str, raw: str) -> int:
 
 # Keep Telegram credentials in Replit Secrets, not in the source file.
 API_ID        = "29481626"
-API_HASH      = _environ.get("API_HASH", "")
-BOT_TOKEN     = _environ.get("BOT_TOKEN", "")
+API_HASH      = "4892185769903521077c4cea97808b8c"
+BOT_TOKEN     = "8903930756:AAEFHfLMk85zx656MZBGDHGJWjbEOT4kzTs"
 if not API_ID or not API_HASH or not BOT_TOKEN:
     raise RuntimeError("Missing required Replit Secrets: API_ID, API_HASH, BOT_TOKEN")
 AUTH_USERS    = _parse_id_list("AUTH_USERS", _environ.get("AUTH_USERS", ""))
