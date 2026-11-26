@@ -1,4 +1,75 @@
 #EXTM3U
+▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬Channel 1▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬
+#EXTINF:-1 tvg-name="Wow Kidz" group-title="Channel 1",Wow Kidz
+https://yuppparoriglin.akamaized.net/181224/smil:wowkidzhindi.smil/playlist.m3u8?hdnts=st=1735898689~exp=1835898688~acl=*~hmac=f5fe24724fe05481e3841f9eb5ab8efdee0a3dd83645ae9dcf45703f525bab7b
+#EXTINF:-1 tvg-name="MINIX" group-title="Channel 1",MINIX
+https://vodzong.mjunoon.tv:8087/streamtest/157-1M/chunks.m3u8
+#EXTINF:-1 tvg-name="Epic Kids" group-title="Channel 1",Epic Kids
+https://cc-t8lqe1o99pszu.akamaized.net/v1/master/3722c60a815c199d9c0ef36c5b73da68a62b09d1/cc-t8lqe1o99pszu/playlist.m3u8
+#EXTINF:-1 tvg-name="Animax" group-title="Channel 1",Animax
+https://amg02159-kcglobal-amg02159c1-samsung-in-521.playouts.now.amagi.tv/playlist/amg02159-kcglobal-animax-samsungin/playlist.m3u8
+#EXTINF:-1 tvg-name="Green Gold TV" group-title="Channel 1",Green Gold TV
+https://greengold.cdn.runn.tv/greengold/stream/grngld/playlist.m3u8
+#EXTINF:-1 tvg-name="ETV Bal Bharat" group-title="Channel 1",ETV Bal Bharat
+http://datahub11.com:8080/live/1Aoen7elp5/IgMJ60tmAa/355286.ts
+#EXTINF:-1 tvg-name="Disney Channel HD" group-title="Channel 1",Disney Channel HD
+http://datahub11.com:8080/live/9480808/9480808/19741.ts 
+▬▬▬▬▬▬▬▬▬▬▬▬Sun Direct▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬
+#EXTINF:-1 tvg-id="HosannaTV.in@Tamil" group-title="Sun direct",Hungama.1080p
+http://103.185.24.134:3001/HUNGAMA/index.m3u8
+#EXTINF:-1 group-title="Sun direct",SuperHungama.1080p
+http://103.185.24.134:3001/SUPER-HUNGAMA/index.m3u8
+#EXTINF:-1 tvg-id="ETVBalBharat.in@SD" group-title="Sun direct",ETV.Bal.Bharat.1080p
+http://103.185.24.134:3001/ETV-BAL-BHARAT/index.m3u8
+#EXTINF:-1 tvg-id="Nickelodeon.in@SD" group-title="Sun direct",Nick.1080p
+http://103.185.24.134:3001/NICK/index.m3u8
+#EXTINF:-1 tvg-id="Sonic.in@SD" group-title="Sun direct",Sonic.1080p
+http://103.185.24.134:3001/SONIC/index.m3u8
+#EXTINF:-1 tvg-id="NickJr.in@SD" group-title="Sun direct",Nick.Jr.1080p
+http://103.185.24.134:3001/NICK-JR/index.m3u8
+#EXTINF:-1 tvg-id="MNX.in@SD" group-title="Sun direct",MNX
+http://59.103.38.46:8000/play/a052/index.m3u8
+#EXTINF:-1 tvg-name="Pogo.1080p" group-title="Sun direct",Pogo.1080p
+https://bdix.spidy.online/MAC/SBHGOLD/play.php?id=281410
+#EXTINF:-1 group-title="Sun direct",Cartoon Network.Hd.1080p
+http://103.185.24.134:3001/CartoonNetwork/index.m3u8
+══════════════════════Airtel═══════════════════════════
+═════════════════════TataPlay═════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════ 
+#EXTINF:-1 tvg-name="NICK.1080p" group-title="Sun direct",NICK.1080p
+http://103.185.24.134:3001/NICK/index.m3u8
+═══════════════════Tata Play══════════════════════════════════════
+#EXTINF:-1 tvg-name="Cartoon Network HD+ TPLAY" tvg-logo="PUBLIC_LOGO_URL" group-title="Tplay",Cartoon Network HD+ TPLAY
+#EXTGRP:Tplay
+http://103.174.195.62:8000/play/a0db
+#EXTINF:-1 tvg-name="Discovery Kids TPLAY" tvg-logo="PUBLIC_LOGO_URL" group-title="Tplay",Discovery Kids TPLAY
+http://103.174.195.62:8000/play/a0do
+#EXTINF:-1 tvg-name="Disney Channel TPLAY" tvg-logo="PUBLIC_LOGO_URL" group-title="Tplay",Disney Channel TPLAY
+http://103.174.195.62:8000/play/a06q
+#EXTINF:-1 tvg-name="Disney Channel HD TPLAY" tvg-logo="PUBLIC_LOGO_URL" group-title="Tplay",Disney Channel HD TPLAY
+http://103.174.195.62:8000/play/a0cf
+#EXTINF:-1 tvg-name="Disney International HD TPLAY" tvg-logo="PUBLIC_LOGO_URL" group-title="Tplay",Disney International HD TPLAY
+http://103.174.195.62:8000/play/a0d4
+#EXTINF:-1 tvg-name="Disney Junior TPLAY" tvg-logo="PUBLIC_LOGO_URL" group-title="Tplay",Disney Junior TPLAY
+http://103.174.195.62:8000/play/a0eq
+#EXTINF:-1 tvg-name="Hungama TPLAY" tvg-logo="PUBLIC_LOGO_URL" group-title="Tplay",Hungama TPLAY
+http://103.174.195.62:8000/play/a0dj
+#EXTINF:-1 tvg-name="Nick TPLAY" tvg-logo="PUBLIC_LOGO_URL" group-title="Tplay",Nick TPLAY
+http://103.174.195.62:8000/play/a044
+#EXTINF:-1 tvg-name="Nick HD+ TPLAY" tvg-logo="PUBLIC_LOGO_URL" group-title="Tplay",Nick HD+ TPLAY
+http://103.174.195.62:8000/play/a0ch
+#EXTINF:-1 tvg-name="Nick Jr. TPLAY" tvg-logo="PUBLIC_LOGO_URL" group-title="Tplay",Nick Jr. TPLAY
+http://103.174.195.62:8000/play/a02d
+#EXTINF:-1 tvg-name="Pogo TPLAY" tvg-logo="PUBLIC_LOGO_URL" group-title="Tplay",Pogo TPLAY
+http://103.174.195.62:8000/play/a0dp
+#EXTINF:-1 tvg-name="SONY YAY! TPLAY" tvg-logo="PUBLIC_LOGO_URL" group-title="Tplay",SONY YAY! TPLAY
+http://103.174.195.62:8000/play/a0ei
+#EXTINF:-1 tvg-name="Sonic Nickelodeon TPLAY" tvg-logo="PUBLIC_LOGO_URL" group-title="Tplay",Sonic Nickelodeon TPLAY
+http://103.174.195.62:8000/play/a02g
+#EXTINF:-1 tvg-name="Super Hungama TPLAY" tvg-logo="PUBLIC_LOGO_URL" group-title="Tplay",Super Hungama TPLAY
+http://103.174.195.62:8000/play/a0g3
+═════════════════════════════════FW
+#EXTINF:-1 tvg-id="11666" tvg-logo="http://tatatv.cc/stalker_portal/misc/logos/320/11582.png" group-title="FW",POGO FW
+https://mini.allinonereborn.site/tatatv/tatatvnew.php?id=11666
 #EXTINF:-1 tvg-id="11667" tvg-logo="http://tatatv.cc/stalker_portal/misc/logos/320/11583.png" group-title="JIOTV",SONIC
 https://mini.allinonereborn.site/tatatv/tatatvnew.php?id=11667
 #EXTINF:-1 tvg-id="11709" tvg-logo="http://tatatv.cc/stalker_portal/misc/logos/320/11625.jpg" group-title="FW",CARTOON NETWORK HD+
