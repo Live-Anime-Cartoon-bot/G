@@ -1,6 +1,4 @@
 #EXTM3U
-#EXTINF:-1 tvg-id="1079" tvg-logo="http://tatatv.cc/stalker_portal/misc/logos/320/996.jpg" group-title="FW",NICK HD+
-https://mini.allinonereborn.site/tatatv/tatatvnew.php?id=1079
 #EXTINF:-1 tvg-id="11667" tvg-logo="http://tatatv.cc/stalker_portal/misc/logos/320/11583.png" group-title="JIOTV",SONIC
 https://mini.allinonereborn.site/tatatv/tatatvnew.php?id=11667
 #EXTINF:-1 tvg-id="11709" tvg-logo="http://tatatv.cc/stalker_portal/misc/logos/320/11625.jpg" group-title="FW",CARTOON NETWORK HD+
@@ -19,3 +17,5 @@ https://mini.allinonereborn.site/tatatv/tatatvnew.php?id=641
 https://mini.allinonereborn.site/tatatv/tatatvnew.php?id=63016
 #EXTINF:-1 tvg-id="50040" tvg-logo="http://tatatv.cc/stalker_portal/misc/logos/320/49824.png" group-title="JIOTV",NICK JR.
 https://mini.allinonereborn.site/tatatv/tatatvnew.php?id=50040
+#EXTINF:-1 tvg-id="50040" tvg-logo="http://tatatv.cc/stalker_portal/misc/logos/320/74717.png" group-title="FW",SUPER HUNGAMA.
+https://mini.allinonereborn.site/tatatv/tatatvnew.php?id=77032
